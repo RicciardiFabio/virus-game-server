@@ -55,40 +55,42 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    // 3) bot updates (solo host li manda)
-    // bot update (solo host, ma qui lo accettiamo e broadcastiamo)
-    if (data.type === "bot") {
-      const roomId = ws._roomId;
-      if (!roomId) return;
 
-      const room = getRoom(roomId);
-      const botId = String(data.id || "bot-virus0");
+// 3) bot updates (solo host li manda)
+// bot update (solo host, ma qui lo accettiamo e broadcastiamo)
+if (data.type === "bot") {
+  const roomId = ws._roomId;
+  if (!roomId) return;
 
-      if (!room.bots) room.bots = {};
-      if (!room.bots[botId]) {
-        room.bots[botId] = {
-          id: botId,
-          name: data.name || "VIRUS-0",
-          x: 500, y: 500, vx: 0, vy: 0,
-          isInfected: true,
-          isAlive: true,
-          isBot: true,
-          lastUpdate: Date.now(),
-        };
-      }
+  const room = getRoom(roomId);
+  const botId = String(data.id || "bot-virus0");
 
-      const b = room.bots[botId];
-      if (typeof data.x === "number") b.x = data.x;
-      if (typeof data.y === "number") b.y = data.y;
-      if (typeof data.vx === "number") b.vx = data.vx;
-      if (typeof data.vy === "number") b.vy = data.vy;
-      if (typeof data.isInfected === "boolean") b.isInfected = data.isInfected;
-      if (typeof data.isAlive === "boolean") b.isAlive = data.isAlive;
-      b.lastUpdate = Date.now();
+  if (!room.bots) room.bots = {};
+  if (!room.bots[botId]) {
+    room.bots[botId] = {
+      id: botId,
+      name: data.name || "VIRUS-0",
+      x: 500, y: 500, vx: 0, vy: 0,
+      isInfected: true,
+      isAlive: true,
+      isBot: true,
+      lastUpdate: Date.now(),
+    };
+  }
 
-      broadcastRoom(roomId);
-      return;
-    }
+  const b = room.bots[botId];
+  if (typeof data.x === "number") b.x = data.x;
+  if (typeof data.y === "number") b.y = data.y;
+  if (typeof data.vx === "number") b.vx = data.vx;
+  if (typeof data.vy === "number") b.vy = data.vy;
+  if (typeof data.isInfected === "boolean") b.isInfected = data.isInfected;
+  if (typeof data.isAlive === "boolean") b.isAlive = data.isAlive;
+  b.lastUpdate = Date.now();
+
+  broadcastRoom(roomId);
+  return;
+}
+
 
   });
 
