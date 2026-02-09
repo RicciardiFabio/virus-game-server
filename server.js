@@ -180,7 +180,7 @@ wss.on("connection", (ws) => {
 // Broadcast periodico (20/sec) per ogni room
 setInterval(() => {
   rooms.forEach((_, roomId) => broadcastRoom(roomId));
-}, 50);
+}, 33);
 
 server.listen(PORT, () => {
   console.log("Server listening on", PORT);
