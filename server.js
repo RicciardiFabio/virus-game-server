@@ -1,18 +1,8 @@
-// broadcast throttled (max ~30/sec) per far “seguire” bene l’AI
-const now = Date.now();
-const last = lastMoveBroadcast.get(roomId) || 0;
-if (now - last >= 33) {
-  lastMoveBroadcast.set(roomId, now);
-  broadcastRoom(roomId);
-}
-
-
 import { WebSocketServer } from "ws";
 import http from "http";
 
 const PORT = process.env.PORT || 3000;
 
-// HTTP server: / -> OK
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("OK");
@@ -22,6 +12,9 @@ const wss = new WebSocketServer({ server });
 
 // rooms: Map<roomId, { clients:Set<ws>, players:{[wsId]:player}, bots:{[botId]:bot} }>
 const rooms = new Map();
+
+// per-room broadcast throttle
+const lastBroadcast = new Map();
 
 function getRoom(roomId) {
   const rid = String(roomId || "");
@@ -43,14 +36,22 @@ function broadcastRoom(roomId) {
 
   const payload = JSON.stringify({
     type: "state",
-    players: room.players, // object (wsId -> {name,x,y,...})
-    bots: room.bots,       // object (botId -> {x,y,...})
+    players: room.players, // wsId -> {name,x,y,vx,vy,isAlive,isInfected}
+    bots: room.bots,       // botId -> {x,y,vx,vy,isAlive,isInfected,isBot}
     ts: Date.now(),
   });
 
   room.clients.forEach((c) => {
     if (c.readyState === 1) c.send(payload);
   });
+}
+
+function broadcastRoomThrottled(roomId, minMs = 33) {
+  const now = Date.now();
+  const last = lastBroadcast.get(roomId) || 0;
+  if (now - last < minMs) return;
+  lastBroadcast.set(roomId, now);
+  broadcastRoom(roomId);
 }
 
 wss.on("connection", (ws) => {
@@ -76,17 +77,18 @@ wss.on("connection", (ws) => {
 
       if (!roomId) return;
 
-      // se cambia room, rimuovi da quella vecchia
+      // switch room cleanup
       if (ws._roomId && ws._roomId !== roomId) {
         const oldRoom = getRoom(ws._roomId);
         if (oldRoom) {
           oldRoom.clients.delete(ws);
           delete oldRoom.players[id];
+          if (oldRoom.clients.size === 0) rooms.delete(ws._roomId);
+          else broadcastRoomThrottled(ws._roomId, 0);
         }
       }
 
       ws._roomId = roomId;
-
       const room = getRoom(roomId);
       room.clients.add(ws);
 
@@ -102,43 +104,31 @@ wss.on("connection", (ws) => {
         lastUpdate: Date.now(),
       };
 
-      // (opzionale) broadcast subito
-      broadcastRoom(roomId);
+      broadcastRoomThrottled(roomId, 0);
       return;
     }
 
-    // se non è in una room, ignora
     const roomId = ws._roomId;
     if (!roomId) return;
     const room = getRoom(roomId);
     if (!room) return;
 
-    // 2) movimento player
+    // 2) player move
     if (data.type === "move") {
       const p = room.players[id];
       if (!p) return;
 
-      if (typeof data.name === "string" && data.name) p.name = data.name;
       if (typeof data.x === "number") p.x = data.x;
       if (typeof data.y === "number") p.y = data.y;
       if (typeof data.vx === "number") p.vx = data.vx;
       if (typeof data.vy === "number") p.vy = data.vy;
 
-      // se in futuro mandi anche infection/alive via WS:
       if (typeof data.isInfected === "boolean") p.isInfected = data.isInfected;
       if (typeof data.isAlive === "boolean") p.isAlive = data.isAlive;
 
       p.lastUpdate = Date.now();
 
-      // broadcast throttled (max ~30/sec) per far “seguire” bene l’AI
-const now = Date.now();
-const last = lastMoveBroadcast.get(roomId) || 0;
-if (now - last >= 33) {
-  lastMoveBroadcast.set(roomId, now);
-  broadcastRoom(roomId);
-}
-
-      
+      broadcastRoomThrottled(roomId, 33);
       return;
     }
 
@@ -171,8 +161,7 @@ if (now - last >= 33) {
 
       b.lastUpdate = Date.now();
 
-      // broadcast realtime bot
-      broadcastRoom(roomId);
+      broadcastRoomThrottled(roomId, 33);
       return;
     }
   });
@@ -180,26 +169,22 @@ if (now - last >= 33) {
   ws.on("close", () => {
     const roomId = ws._roomId;
     if (!roomId) return;
+
     const room = getRoom(roomId);
     if (!room) return;
 
     room.clients.delete(ws);
     delete room.players[id];
 
-    // se room vuota, pulisci
     if (room.clients.size === 0) {
       rooms.delete(roomId);
+      lastBroadcast.delete(roomId);
       return;
     }
 
-    broadcastRoom(roomId);
+    broadcastRoomThrottled(roomId, 0);
   });
 });
-
-// Broadcast periodico (20/sec) per ogni room
-setInterval(() => {
-  rooms.forEach((_, roomId) => broadcastRoom(roomId));
-}, 33);
 
 server.listen(PORT, () => {
   console.log("Server listening on", PORT);
