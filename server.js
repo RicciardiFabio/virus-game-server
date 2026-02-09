@@ -1,3 +1,12 @@
+// broadcast throttled (max ~30/sec) per far “seguire” bene l’AI
+const now = Date.now();
+const last = lastMoveBroadcast.get(roomId) || 0;
+if (now - last >= 33) {
+  lastMoveBroadcast.set(roomId, now);
+  broadcastRoom(roomId);
+}
+
+
 import { WebSocketServer } from "ws";
 import http from "http";
 
@@ -120,6 +129,16 @@ wss.on("connection", (ws) => {
       if (typeof data.isAlive === "boolean") p.isAlive = data.isAlive;
 
       p.lastUpdate = Date.now();
+
+      // broadcast throttled (max ~30/sec) per far “seguire” bene l’AI
+const now = Date.now();
+const last = lastMoveBroadcast.get(roomId) || 0;
+if (now - last >= 33) {
+  lastMoveBroadcast.set(roomId, now);
+  broadcastRoom(roomId);
+}
+
+      
       return;
     }
 
