@@ -56,18 +56,40 @@ wss.on("connection", (ws) => {
     }
 
     // 3) bot updates (solo host li manda)
+    // bot update (solo host, ma qui lo accettiamo e broadcastiamo)
     if (data.type === "bot") {
+      const roomId = ws._roomId;
+      if (!roomId) return;
+
+      const room = getRoom(roomId);
       const botId = String(data.id || "bot-virus0");
-      if (!bots[botId]) bots[botId] = {};
-      if (typeof data.x === "number") bots[botId].x = data.x;
-      if (typeof data.y === "number") bots[botId].y = data.y;
-      if (typeof data.vx === "number") bots[botId].vx = data.vx;
-      if (typeof data.vy === "number") bots[botId].vy = data.vy;
-      if (typeof data.isInfected === "boolean") bots[botId].isInfected = data.isInfected;
-      if (typeof data.isAlive === "boolean") bots[botId].isAlive = data.isAlive;
-      bots[botId].lastUpdate = Date.now();
+
+      if (!room.bots) room.bots = {};
+      if (!room.bots[botId]) {
+        room.bots[botId] = {
+          id: botId,
+          name: data.name || "VIRUS-0",
+          x: 500, y: 500, vx: 0, vy: 0,
+          isInfected: true,
+          isAlive: true,
+          isBot: true,
+          lastUpdate: Date.now(),
+        };
+      }
+
+      const b = room.bots[botId];
+      if (typeof data.x === "number") b.x = data.x;
+      if (typeof data.y === "number") b.y = data.y;
+      if (typeof data.vx === "number") b.vx = data.vx;
+      if (typeof data.vy === "number") b.vy = data.vy;
+      if (typeof data.isInfected === "boolean") b.isInfected = data.isInfected;
+      if (typeof data.isAlive === "boolean") b.isAlive = data.isAlive;
+      b.lastUpdate = Date.now();
+
+      broadcastRoom(roomId);
       return;
     }
+
   });
 
   ws.on("close", () => {
