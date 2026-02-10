@@ -10,10 +10,10 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 
-// rooms: Map<roomId, { clients:Set<ws>, players:{[wsId]:player}, bots:{[botId]:bot} }>
+// rooms: Map<roomId, { clients:Set<ws>, players:{...} (legacy), bots:{...} (legacy), v2HostId, v2HostName }>
 const rooms = new Map();
 
-// per-room broadcast throttle
+// per-room broadcast throttle (legacy)
 const lastBroadcast = new Map();
 
 function getRoom(roomId) {
@@ -25,25 +25,36 @@ function getRoom(roomId) {
       clients: new Set(),
       players: {},
       bots: {},
+      v2HostId: null,
+      v2HostName: null,
     });
   }
   return rooms.get(rid);
 }
 
-function broadcastRoom(roomId) {
+function roomClientList(room) {
+  return Array.from(room.clients).filter((c) => c && c.readyState === 1);
+}
+
+function broadcastRaw(roomId, obj) {
+  const room = getRoom(roomId);
+  if (!room) return;
+  const payload = JSON.stringify(obj);
+  roomClientList(room).forEach((c) => c.send(payload));
+}
+
+function broadcastRoomLegacy(roomId) {
   const room = getRoom(roomId);
   if (!room) return;
 
   const payload = JSON.stringify({
     type: "state",
-    players: room.players, // wsId -> {name,x,y,vx,vy,isAlive,isInfected}
-    bots: room.bots,       // botId -> {x,y,vx,vy,isAlive,isInfected,isBot}
+    players: room.players,
+    bots: room.bots,
     ts: Date.now(),
   });
 
-  room.clients.forEach((c) => {
-    if (c.readyState === 1) c.send(payload);
-  });
+  roomClientList(room).forEach((c) => c.send(payload));
 }
 
 function broadcastRoomThrottled(roomId, minMs = 33) {
@@ -51,7 +62,37 @@ function broadcastRoomThrottled(roomId, minMs = 33) {
   const last = lastBroadcast.get(roomId) || 0;
   if (now - last < minMs) return;
   lastBroadcast.set(roomId, now);
-  broadcastRoom(roomId);
+  broadcastRoomLegacy(roomId);
+}
+
+function ensureV2Host(roomId) {
+  const room = getRoom(roomId);
+  if (!room) return null;
+
+  if (room.v2HostId && roomClientList(room).some((c) => c._id === room.v2HostId)) {
+    return { hostId: room.v2HostId, hostName: room.v2HostName };
+  }
+
+  const list = roomClientList(room);
+  if (list.length === 0) {
+    room.v2HostId = null;
+    room.v2HostName = null;
+    return null;
+  }
+
+  // eletto: primo client attivo
+  room.v2HostId = list[0]._id;
+  room.v2HostName = list[0]._name || null;
+
+  broadcastRaw(roomId, {
+    type: "v2_host",
+    roomId,
+    hostId: room.v2HostId,
+    hostName: room.v2HostName,
+    ts: Date.now(),
+  });
+
+  return { hostId: room.v2HostId, hostName: room.v2HostName };
 }
 
 wss.on("connection", (ws) => {
@@ -59,6 +100,7 @@ wss.on("connection", (ws) => {
 
   ws._id = id;
   ws._roomId = null;
+  ws._name = null;
 
   ws.send(JSON.stringify({ type: "init", id }));
 
@@ -70,6 +112,91 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    // ============ V2 PROTOCOL ============
+    if (String(data.type || "").startsWith("v2_")) {
+      const roomId = String(data.roomId || ws._roomId || "");
+      if (!roomId) return;
+
+      // join room if needed
+      if (!ws._roomId || ws._roomId !== roomId) {
+        // cleanup old
+        if (ws._roomId && ws._roomId !== roomId) {
+          const oldRoom = getRoom(ws._roomId);
+          if (oldRoom) {
+            oldRoom.clients.delete(ws);
+            if (oldRoom.clients.size === 0) {
+              rooms.delete(ws._roomId);
+              lastBroadcast.delete(ws._roomId);
+            } else {
+              ensureV2Host(ws._roomId);
+            }
+          }
+        }
+
+        ws._roomId = roomId;
+        const room = getRoom(roomId);
+        room.clients.add(ws);
+      }
+
+      if (data.type === "v2_hello") {
+        ws._name = String(data.name || ws._name || "");
+        const room = getRoom(roomId);
+        if (room && !room.v2HostId) {
+          room.v2HostId = ws._id;
+          room.v2HostName = ws._name || null;
+        }
+        ensureV2Host(roomId);
+
+        // echo to room (ok)
+        broadcastRaw(roomId, { ...data, ts: Date.now() });
+        return;
+      }
+
+      if (data.type === "v2_join") {
+        ws._name = String(data.name || ws._name || "");
+        const room = getRoom(roomId);
+        room.clients.add(ws);
+        ensureV2Host(roomId);
+
+        broadcastRaw(roomId, { ...data, ts: Date.now() });
+        return;
+      }
+
+      if (data.type === "v2_resync") {
+        ensureV2Host(roomId);
+        broadcastRaw(roomId, { ...data, ts: Date.now() });
+        return;
+      }
+
+      if (data.type === "v2_input") {
+        // manda a tutti: solo host lo userà
+        broadcastRaw(roomId, { ...data, _from: ws._id, ts: Date.now() });
+        return;
+      }
+
+      if (data.type === "v2_init") {
+        // static init
+        broadcastRaw(roomId, { ...data, _from: ws._id, ts: Date.now() });
+        return;
+      }
+
+      if (data.type === "v2_snapshot") {
+        // snapshot realtime
+        broadcastRaw(roomId, { ...data, _from: ws._id, ts: Date.now() });
+        return;
+      }
+
+      if (data.type === "v2_gameOver") {
+        broadcastRaw(roomId, { ...data, _from: ws._id, ts: Date.now() });
+        return;
+      }
+
+      // default v2: relay
+      broadcastRaw(roomId, { ...data, _from: ws._id, ts: Date.now() });
+      return;
+    }
+
+    // ============ LEGACY PROTOCOL (compat) ============
     // 1) hello: join room + set name
     if (data.type === "hello") {
       const roomId = String(data.roomId || "");
@@ -89,6 +216,7 @@ wss.on("connection", (ws) => {
       }
 
       ws._roomId = roomId;
+      ws._name = name;
       const room = getRoom(roomId);
       room.clients.add(ws);
 
@@ -174,7 +302,7 @@ wss.on("connection", (ws) => {
     if (!room) return;
 
     room.clients.delete(ws);
-    delete room.players[id];
+    delete room.players[ws._id];
 
     if (room.clients.size === 0) {
       rooms.delete(roomId);
@@ -182,6 +310,10 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    // v2 host migration
+    ensureV2Host(roomId);
+
+    // legacy broadcast
     broadcastRoomThrottled(roomId, 0);
   });
 });
