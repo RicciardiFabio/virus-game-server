@@ -1,7 +1,7 @@
 import { WebSocketServer } from 'ws';
 import http from 'http';
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 const server = http.createServer((req, res) => { 
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end("Virus Server Online"); 
@@ -79,8 +79,7 @@ wss.on('connection', (ws) => {
 
 // Forza l'ascolto su 0.0.0.0 per Railway
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`=== SERVER IN ASCOLTO SULLA PORTA ${PORT} ===`);
-    console.log(`=== ACCETTO CONNESSIONI SU 0.0.0.0:${PORT} ===`);
+    console.log(`=== SERVER ONLINE SULLA PORTA ${PORT} ===`);
 });
 
 // Aggiungi questo per evitare che il processo si chiuda improvvisamente
