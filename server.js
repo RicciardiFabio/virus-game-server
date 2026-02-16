@@ -1,13 +1,13 @@
 import { WebSocketServer } from 'ws';
 import http from 'http';
 
-// Usa la porta assegnata da Railway, altrimenti 3000 come fallback locale
-const PORT = process.env.PORT || 3000; 
+// Forziamo la 8080 visto che Railway si aspetta quella
+const PORT = 8080; 
 
-// Assicurati che l'HTTP server risponda SEMPRE con 200 OK per l'Health Check
 const server = http.createServer((req, res) => { 
+    // Risposta per l'Health Check di Railway
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end("ALIVE"); 
+    res.end("OK"); 
 });
 
 const wss = new WebSocketServer({ server });
@@ -82,7 +82,7 @@ wss.on('connection', (ws) => {
 
 // Fondamentale: usa '0.0.0.0' e la variabile PORT
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`=== SERVER ONLINE SULLA PORTA ${PORT} ===`);
+    console.log(`=== SERVER ONLINE FISSO SU PORTA ${PORT} ===`);
 });
 
 // Aggiungi questo per evitare che il processo si chiuda improvvisamente
