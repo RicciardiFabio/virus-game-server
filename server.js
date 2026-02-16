@@ -1,54 +1,52 @@
-const io = require('socket.io')(3001, {
-  cors: { origin: "*" } // Permette al tuo gioco di connettersi
+const io = require('socket.io')(8080, {
+  cors: { origin: "*" } 
 });
 
 const rooms = {};
 
 io.on('connection', (socket) => {
-  console.log(`Utente connesso: ${socket.id}`);
+  console.log(`Connesso: ${socket.id}`);
 
   socket.on('v2_hello', (data) => {
     const { roomId, name } = data;
     socket.join(roomId);
     
-    // Gestione Stanze e Host
+    // Gestione della stanza
     if (!rooms[roomId]) {
-      rooms[roomId] = { hostId: socket.id, players: [] };
+      rooms[roomId] = { hostId: socket.id };
     }
     
     const isHost = rooms[roomId].hostId === socket.id;
     
-    // 1. Risposta al giocatore che entra
+    // 1. Rispondi a chi è appena entrato
     socket.emit('v2_welcome', {
       isHost: isHost,
       myAssignedId: socket.id,
       hostId: rooms[roomId].hostId
     });
 
-    // 2. Avvisa TUTTI gli altri (incluso l'Host) che è entrato qualcuno
+    // 2. Avvisa l'Host (e gli altri) che un nuovo player è entrato
     socket.to(roomId).emit('v2_player_joined', {
       id: socket.id,
       name: name
     });
-    
-    console.log(`Giocatore ${name} entrato nella stanza ${roomId}. Host: ${isHost}`);
   });
 
-  // IL CUORE DELLA SINCRONIZZAZIONE
+  // IL CUORE DEL MULTIPLAYER: Inoltro dati
   socket.on('v2_state', (data) => {
-    // Il server prende il pacchetto (posizione, bot, meteo) 
-    // e lo rimanda a tutti gli ALTRI nella stanza
+    // Rispedisce il messaggio a tutti gli altri nella stanza
+    // Aggiunge il campo _from fondamentale per la sincronizzazione
     socket.to(data.roomId).emit('v2_state', {
       ...data,
-      _from: socket.id // Fondamentale: dice al client chi ha mandato il dato
+      _from: socket.id 
     });
   });
 
-  socket.on('disconnecting', () => {
-    // Se l'host esce, dobbiamo nominare un nuovo host o chiudere la stanza
-    for (const roomId of socket.rooms) {
-      if (rooms[roomId] && rooms[roomId].hostId === socket.id) {
-        const remaining = Array.from(io.sockets.adapter.rooms.get(roomId) || []).filter(id => id !== socket.id);
+  socket.on('disconnect', () => {
+    // Se l'host esce, nomina un nuovo host
+    for (const roomId in rooms) {
+      if (rooms[roomId].hostId === socket.id) {
+        const remaining = Array.from(io.sockets.adapter.rooms.get(roomId) || []);
         if (remaining.length > 0) {
           rooms[roomId].hostId = remaining[0];
           io.to(remaining[0]).emit('v2_welcome', { isHost: true, hostId: remaining[0] });
@@ -60,4 +58,4 @@ io.on('connection', (socket) => {
   });
 });
 
-console.log("Server Multiplayer V28 attivo sulla porta 3001");
+console.log("Server Multiplayer V28 pronto sulla porta 8080");
