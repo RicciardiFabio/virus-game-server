@@ -1,39 +1,29 @@
 import { WebSocketServer } from 'ws';
 import http from 'http';
 
-// Porta dinamica per Railway (fallback 8080)
 const PORT = process.env.PORT || 8080; 
 
-// Server HTTP per Health Check e WebSocket
 const server = http.createServer((req, res) => { 
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end("VIRUS SERVER STATUS: OPERATIONAL"); 
+    res.end("VIRUS SERVER OPERATIONAL"); 
 });
 
 const wss = new WebSocketServer({ server });
 const rooms = new Map();
 
-console.log("=== VIRUS SERVER V8 (STABLE) STARTING ===");
+console.log("=== VIRUS SERVER V9 (HOST-FIX) STARTING ===");
 
 wss.on('connection', (ws) => {
     const sessionId = Math.random().toString(36).slice(2, 10);
     ws._id = sessionId;
     
-    console.log(`[CONN] Nuovo agente collegato: ${sessionId}`);
-    
-    // 1. Invio ID iniziale al client
     ws.send(JSON.stringify({ type: 'init', id: sessionId }));
 
     ws.on('message', (raw) => {
-        const messageString = raw.toString();
-        
         try {
-            const data = JSON.parse(messageString);
-            
-            // LOG DEL TRAFFICO IN ENTRATA
-            console.log(`[DATA] Da ${ws._id}: ${data.type}`);
+            const data = JSON.parse(raw.toString());
+            console.log(`[${data.type}] da ${ws._id}`);
 
-            // GESTIONE: GET_ROOMS
             if (data.type === 'get_rooms') {
                 const list = Array.from(rooms.entries()).map(([id, r]) => ({
                     id, name: id, playerCount: r.size
@@ -41,67 +31,69 @@ wss.on('connection', (ws) => {
                 ws.send(JSON.stringify({ type: 'rooms_list', rooms: list }));
             }
 
-            // GESTIONE: CREATE_ROOM / JOIN
             if (data.type === 'create_room') {
                 const rName = data.roomName || "SECTOR_" + Math.random().toString(36).slice(2, 7).toUpperCase();
                 ws._roomId = rName;
+                ws._isHost = true; // Segniamo che questo utente è l'host
                 
-                if (!rooms.has(rName)) {
-                    rooms.set(rName, new Set());
-                }
+                if (!rooms.has(rName)) rooms.set(rName, new Set());
                 rooms.get(rName).add(ws);
                 
-                console.log(`[ROOM] Inserito in: ${rName} | Totale: ${rooms.get(rName).size}`);
+                console.log(`[HOST] Stanza creata: ${rName}`);
                 
-                // Conferma al client l'avvenuta creazione/ingresso
+                // Risposta per confermare all'host che la stanza è pronta
                 ws.send(JSON.stringify({ 
                     type: 'room_created', 
+                    roomId: rName,
+                    success: true 
+                }));
+                
+                // Alcuni client si aspettano anche questo per smettere il caricamento
+                ws.send(JSON.stringify({ 
+                    type: 'room_joined', 
                     roomId: rName, 
-                    id: sessionId 
+                    isHost: true 
                 }));
             }
 
-            // GESTIONE: V2_HELLO (Il punto dove si bloccava)
             if (data.type === 'v2_hello') {
-                const rId = data.roomId || ws._roomId;
-                console.log(`[GAME] handshake ricevuto da ${data.name} (${ws._id})`);
-                
-                // Rispondiamo con WELCOME per sbloccare l'interfaccia del gioco
+                const rName = data.roomId || ws._roomId;
+                console.log(`[HANDSHAKE] Host/Player pronto: ${data.name}`);
+
+                // Risposta completa: il client smette di mandare hello solo se riceve v2_welcome
                 ws.send(JSON.stringify({
                     type: 'v2_welcome',
-                    roomId: rId,
+                    roomId: rName,
                     playerId: ws._id,
-                    players: [] // Inviabile per inizializzare altri player se necessario
+                    isHost: ws._isHost || false,
+                    config: { maxPlayers: 4 }, // Parametri spesso richiesti dai client
+                    players: Array.from(rooms.get(rName) || []).map(p => ({ id: p._id }))
                 }));
             }
 
-            // GESTIONE: BROADCAST DEI MOVIMENTI (Facoltativo ma utile)
-            // Se invii pacchetti di gioco, puoi girarli a tutti gli altri nella stanza qui
+            if (data.type === 'leave_room') {
+                console.log(`[LEAVE] ${ws._id} ha lasciato la stanza`);
+                handleDisconnect(ws);
+            }
 
         } catch (e) {
-            console.error("[ERR] Errore elaborazione messaggio:", e);
+            console.error("[ERR]", e);
         }
     });
 
-    ws.on('close', () => {
-        console.log(`[DISC] Agente ${ws._id} disconnesso`);
-        if (ws._roomId && rooms.has(ws._roomId)) {
-            rooms.get(ws._roomId).delete(ws);
-            if (rooms.get(ws._roomId).size === 0) {
-                rooms.delete(ws._roomId);
-                console.log(`[ROOM] Settore ${ws._roomId} chiuso (vuoto)`);
-            }
-        }
-    });
+    ws.on('close', () => handleDisconnect(ws));
 });
 
-// Avvio del server su 0.0.0.0
+function handleDisconnect(ws) {
+    if (ws._roomId && rooms.has(ws._roomId)) {
+        rooms.get(ws._roomId).delete(ws);
+        if (rooms.get(ws._roomId).size === 0) {
+            rooms.delete(ws._roomId);
+            console.log(`[CLEANUP] Stanza ${ws._roomId} eliminata`);
+        }
+    }
+}
+
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`=== SERVER ONLINE SU PORTA ${PORT} ===`);
-    console.log(`=== MONITORAGGIO ATTIVO ===`);
-});
-
-// Protezione contro i crash fatali
-process.on('uncaughtException', (err) => {
-    console.error('[FATAL ERROR]:', err);
+    console.log(`=== SERVER ONLINE SULLA PORTA ${PORT} ===`);
 });
