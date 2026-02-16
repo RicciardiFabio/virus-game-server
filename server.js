@@ -2,11 +2,11 @@ import { WebSocketServer } from 'ws';
 import http from 'http';
 
 const PORT = process.env.PORT || 8080;
-const server = http.createServer((req, res) => { res.writeHead(200); res.end("VIRUS-0 SERVER OPTIMIZED"); });
+const server = http.createServer((req, res) => { res.writeHead(200); res.end("VIRUS-0 SERVER V22"); });
 const wss = new WebSocketServer({ server });
 const rooms = new Map();
 
-console.log("=== SERVER AVVIATO (V21 - FINAL SYNC) ===");
+console.log("=== SERVER V22: METEO & SYNC READY ===");
 
 wss.on('connection', (ws) => {
     const sessionId = Math.random().toString(36).slice(2, 10);
@@ -17,98 +17,100 @@ wss.on('connection', (ws) => {
         try {
             const msg = JSON.parse(raw.toString());
 
-            // --- LISTA STANZE (Fix per la Lobby) ---
+            // --- LOBBY: Solo stanze con giocatori ---
             if (msg.type === 'get_rooms') {
-                const list = Array.from(rooms.entries()).map(([id, r]) => ({
-                    id: id, 
-                    roomId: id,
-                    name: id, 
-                    playerCount: r.clients.size 
-                }));
-                // Mandiamo sia 'rooms' che 'data' per massima compatibilità
+                const list = Array.from(rooms.entries())
+                    .filter(([_, r]) => r.clients.size > 0)
+                    .map(([id, r]) => ({
+                        id, name: id, playerCount: r.clients.size
+                    }));
                 ws.send(JSON.stringify({ type: 'rooms_list', rooms: list, data: list }));
                 return;
             }
 
-            // --- CREAZIONE STANZA ---
-            if (msg.type === 'create_room') {
-                const rName = msg.roomName || msg.roomId || "ROOM_" + sessionId;
+            // --- CREAZIONE / JOIN ---
+            if (msg.type === 'create_room' || msg.type === 'v2_hello' || msg.type === 'v2_join') {
+                const rName = msg.roomId || msg.roomName || "SECTOR-1";
                 ws._roomId = rName;
-                ws._isHost = true;
-                
+                ws._name = msg.name || "Agent";
+
                 if (!rooms.has(rName)) {
-                    rooms.set(rName, { clients: new Set() });
+                    rooms.set(rName, { 
+                        clients: new Set(), 
+                        hostId: sessionId,
+                        gameStarted: false,
+                        weather: ['CLEAR', 'STORM', 'ACID_RAIN'][Math.floor(Math.random() * 3)]
+                    });
+                    ws._isHost = true;
                 }
-                rooms.get(rName).clients.add(ws);
                 
-                ws.send(JSON.stringify({ 
-                    type: 'room_created', 
-                    roomId: rName, 
-                    id: ws._id, 
-                    isHost: true 
+                const room = rooms.get(rName);
+                room.clients.add(ws);
+
+                // Aggiorniamo l'host se quello vecchio se n'è andato
+                if (!Array.from(room.clients).some(c => c._id === room.hostId)) {
+                    room.hostId = sessionId;
+                    ws._isHost = true;
+                }
+
+                ws.send(JSON.stringify({
+                    type: 'v2_welcome',
+                    roomId: rName,
+                    isHost: ws._id === room.hostId,
+                    hostId: room.hostId,
+                    players: Array.from(room.clients).map(c => ({ id: c._id, name: c._name }))
                 }));
-                return;
+
+                // Notifica agli altri
+                const joinAnnounce = JSON.stringify({ type: 'v2_join', _from: ws._id, name: ws._name });
+                room.clients.forEach(c => { if(c !== ws) c.send(joinAnnounce); });
             }
 
-            // --- HANDSHAKE V2 (Sblocca WaitingRoom) ---
-            if (msg.type === 'v2_hello' || msg.type === 'v2_join') {
-                const rName = ws._roomId || msg.roomId;
-                if (rName && rooms.has(rName)) {
-                    ws._roomId = rName;
-                    ws._name = msg.name || "Agent";
-                    const room = rooms.get(rName);
-                    
-                    if (!room.clients.has(ws)) room.clients.add(ws);
-
-                    ws.send(JSON.stringify({
-                        type: 'v2_welcome',
-                        roomId: rName,
-                        isHost: ws._isHost || false,
-                        players: Array.from(room.clients).map(c => ({ id: c._id, name: c._name }))
-                    }));
-
-                    const joinMsg = JSON.stringify({
-                        type: 'v2_join',
-                        _from: ws._id, // Fondamentale per il tuo client!
-                        name: ws._name
-                    });
-                    
-                    room.clients.forEach(client => {
-                        if (client !== ws && client.readyState === 1) client.send(joinMsg);
-                    });
-                }
-            }
-
-            // --- START GAME (Sblocca schermo nero) ---
+            // --- START PARTITA (SINCRONIZZATA) ---
             if (msg.type === 'v2_start') {
-                if (ws._roomId && rooms.has(ws._roomId)) {
-                    const startSignal = JSON.stringify({ type: 'v2_start' });
-                    rooms.get(ws._roomId).clients.forEach(client => {
-                        if(client.readyState === 1) client.send(startSignal);
+                const room = rooms.get(ws._roomId);
+                if (room && ws._id === room.hostId && room.clients.size >= 2) {
+                    console.log(`[START] Stanza ${ws._roomId} avviata con meteo: ${room.weather}`);
+                    
+                    const startData = JSON.stringify({ 
+                        type: 'v2_start',
+                        config: {
+                            weather: room.weather,
+                            seed: Math.random(),
+                            powerUps: [
+                                { id: 1, type: 'SPEED', x: 200, y: 300 },
+                                { id: 2, type: 'SHIELD', x: 500, y: 100 }
+                            ]
+                        }
                     });
+                    
+                    room.gameStarted = true;
+                    room.clients.forEach(c => c.send(startData));
                 }
             }
-            
-            // --- MOVIMENTI ---
+
+            // --- RELAY STATO ---
             if (msg.type === 'v2_state') {
-                 const rId = msg.roomId || ws._roomId;
-                 if (rId && rooms.has(rId)) {
-                     const payload = JSON.stringify({ ...msg, _from: ws._id });
-                     rooms.get(rId).clients.forEach(client => {
-                         if (client !== ws && client.readyState === 1) client.send(payload);
-                     });
-                 }
+                const room = rooms.get(ws._roomId);
+                if (room) {
+                    const payload = JSON.stringify({ ...msg, _from: ws._id });
+                    room.clients.forEach(c => { if(c !== ws) c.send(payload); });
+                }
             }
 
-        } catch (e) { console.error("Errore:", e); }
+        } catch (e) { console.error(e); }
     });
 
     ws.on('close', () => {
         if (ws._roomId && rooms.has(ws._roomId)) {
-            rooms.get(ws._roomId).clients.delete(ws);
-            if (rooms.get(ws._roomId).clients.size === 0) rooms.delete(ws._roomId);
+            const room = rooms.get(ws._roomId);
+            room.clients.delete(ws);
+            if (room.clients.size === 0) {
+                rooms.delete(ws._roomId);
+                console.log(`[CLEANUP] Stanza ${ws._roomId} eliminata.`);
+            }
         }
     });
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`PORT: ${PORT}`));
+server.listen(PORT, '0.0.0.0');
