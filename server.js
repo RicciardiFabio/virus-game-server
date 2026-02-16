@@ -6,6 +6,8 @@ const server = http.createServer((req, res) => { res.writeHead(200); res.end("OK
 const wss = new WebSocketServer({ server });
 const rooms = new Map();
 
+console.log("=== VIRUS SERVER V18 (ANTI-BLACK-SCREEN) ===");
+
 wss.on('connection', (ws) => {
     const sessionId = Math.random().toString(36).slice(2, 10);
     ws._id = sessionId;
@@ -16,45 +18,80 @@ wss.on('connection', (ws) => {
     ws.on('message', (raw) => {
         try {
             const msg = JSON.parse(raw.toString());
-            const type = msg.type || (msg.data && msg.data.type);
+            const type = msg.type;
             
             if (type === 'get_rooms') {
                 const list = Array.from(rooms.entries()).map(([id, c]) => ({ id, roomId: id, playerCount: c.size }));
-                ws.send(JSON.stringify({ type: 'rooms_list', rooms: list, data: list }));
+                ws.send(JSON.stringify({ type: 'rooms_list', rooms: list }));
             }
 
-            if (type === 'create_room' || type === 'v2_join' || type === 'join_room') {
-                const rName = msg.roomName || msg.roomId || msg.data?.roomId || "MASTER";
+            if (type === 'create_room' || type === 'join_room' || type === 'v2_join') {
+                const rName = msg.roomName || msg.roomId || msg.data?.roomId || "SECTOR_1";
                 ws._roomId = rName;
-                if (!rooms.has(rName)) { rooms.set(rName, new Set()); ws._isHost = true; }
+                if (!rooms.has(rName)) {
+                    rooms.set(rName, new Set());
+                    ws._isHost = true;
+                }
                 rooms.get(rName).add(ws);
 
-                // MANDIAMO UN "BOMBARDAMENTO" DI CONFERME
+                // CREIAMO UN PLAYER OBJECT COMPLETO (Per evitare lo schermo nero)
+                const playerObj = {
+                    id: ws._id,
+                    playerId: ws._id,
+                    name: "Survivor",
+                    x: 100, // Posizione iniziale
+                    y: 100,
+                    health: 100,
+                    isHost: ws._isHost || false
+                };
+
+                const playersInRoom = Array.from(rooms.get(rName)).map(p => ({
+                    id: p._id,
+                    playerId: p._id,
+                    name: "Survivor",
+                    x: 100,
+                    y: 100,
+                    isHost: p._isHost || false
+                }));
+
                 const handshake = {
                     type: 'v2_welcome',
                     roomId: rName,
-                    id: sessionId,
+                    id: ws._id,
+                    playerId: ws._id,
                     isHost: ws._isHost || false,
-                    players: Array.from(rooms.get(rName)).map(p => ({ id: p._id })),
-                    data: { roomId: rName, isHost: ws._isHost || false }
+                    players: playersInRoom,
+                    data: {
+                        roomId: rName,
+                        player: playerObj,
+                        players: playersInRoom
+                    }
                 };
                 
                 ws.send(JSON.stringify(handshake));
-                ws.send(JSON.stringify({ ...handshake, type: 'room_created' }));
                 ws.send(JSON.stringify({ ...handshake, type: 'room_joined' }));
+                console.log(`[GAME] Handshake inviato a ${ws._id}.`);
             }
 
-            if (type === 'v2_hello') {
-                // Risposta standard al loop
-                ws.send(JSON.stringify({
-                    type: 'v2_welcome',
-                    roomId: ws._roomId,
-                    id: ws._id,
-                    data: { roomId: ws._roomId, isHost: ws._isHost || false }
-                }));
+            // Gestione dei movimenti per non far stare fermi i giocatori
+            if (type === 'move') {
+                // Inoltra il movimento a tutti gli altri nella stanza
+                if (ws._roomId && rooms.has(ws._roomId)) {
+                    const moveData = JSON.stringify({ type: 'player_moved', ...msg });
+                    rooms.get(ws._roomId).forEach(client => {
+                        if (client !== ws) client.send(moveData);
+                    });
+                }
             }
-        } catch (e) {}
+
+        } catch (e) { console.error("Errore"); }
+    });
+
+    ws.on('close', () => {
+        if (ws._roomId && rooms.has(ws._roomId)) {
+            rooms.get(ws._roomId).delete(ws);
+        }
     });
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log("V17 ONLINE"));
+server.listen(PORT, '0.0.0.0', () => console.log("V18 ONLINE - PRONTO AL GIOCO"));
