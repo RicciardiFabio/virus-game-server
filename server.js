@@ -77,6 +77,13 @@ wss.on('connection', (ws) => {
     });
 });
 
-server.listen(PORT, () => {
+// Forza l'ascolto su 0.0.0.0 per Railway
+server.listen(PORT, '0.0.0.0', () => {
     console.log(`=== SERVER IN ASCOLTO SULLA PORTA ${PORT} ===`);
+    console.log(`=== ACCETTO CONNESSIONI SU 0.0.0.0:${PORT} ===`);
+});
+
+// Aggiungi questo per evitare che il processo si chiuda improvvisamente
+process.on('uncaughtException', (err) => {
+    console.error('[FATAL ERR] Eccezione non gestita:', err);
 });
