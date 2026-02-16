@@ -2,29 +2,31 @@ import { WebSocketServer } from 'ws';
 import http from 'http';
 
 const PORT = process.env.PORT || 8080;
-const server = http.createServer((req, res) => { res.writeHead(200); res.end("VIRUS-0 V26"); });
+const server = http.createServer((req, res) => { res.writeHead(200); res.end("VIRUS-0 V28"); });
 const wss = new WebSocketServer({ server });
 const rooms = new Map();
 
+// Funzione che urla a TUTTI la lista aggiornata
 const broadcastRoomList = () => {
     const list = Array.from(rooms.entries())
-        .filter(([_, r]) => r.clients.size > 0) // PULIZIA: Mostra solo stanze con persone
         .map(([id, r]) => ({ id, name: id, playerCount: r.clients.size }));
+    
     const payload = JSON.stringify({ type: 'rooms_list', rooms: list });
     wss.clients.forEach(c => { if (c.readyState === 1) c.send(payload); });
 };
 
 wss.on('connection', (ws) => {
     ws._id = Math.random().toString(36).slice(2, 10);
-    // IMPORTANTE: Mandiamo subito l'ID al client
     ws.send(JSON.stringify({ type: 'init', id: ws._id }));
 
     ws.on('message', (raw) => {
         try {
             const msg = JSON.parse(raw.toString());
 
-            if (msg.type === 'v2_hello' || msg.type === 'join_room') {
-                const rId = msg.roomId || "SECTOR-1";
+            if (msg.type === 'get_rooms') broadcastRoomList();
+
+            if (msg.type === 'v2_hello' || msg.type === 'join_room' || msg.type === 'create_room') {
+                const rId = msg.roomId || msg.roomName || "SECTOR-1";
                 ws._roomId = rId;
                 ws._name = msg.name || "Agent";
 
@@ -39,28 +41,22 @@ wss.on('connection', (ws) => {
                 const room = rooms.get(rId);
                 room.clients.add(ws);
 
-                console.log(`CHECK: Player ${ws._name} (${ws._id}) joined. Host is ${room.hostId}`);
-
-                const welcome = JSON.stringify({
+                ws.send(JSON.stringify({
                     type: 'v2_welcome',
                     roomId: rId,
                     isHost: (ws._id === room.hostId),
                     hostId: room.hostId,
-                    myAssignedId: ws._id, // Forziamo l'id nel messaggio
+                    myAssignedId: ws._id,
                     players: Array.from(room.clients).map(c => ({ id: c._id, name: c._name })),
                     config: { weather: room.weather }
-                });
-                ws.send(welcome);
+                }));
                 broadcastRoomList();
             }
 
             if (msg.type === 'v2_start' && rooms.has(ws._roomId)) {
                 const room = rooms.get(ws._roomId);
                 if (ws._id === room.hostId) {
-                    room.clients.forEach(c => c.send(JSON.stringify({ 
-                        type: 'v2_start', 
-                        config: { weather: room.weather } 
-                    })));
+                    room.clients.forEach(c => c.send(JSON.stringify({ type: 'v2_start', config: { weather: room.weather } })));
                 }
             }
         } catch (e) {}
@@ -70,7 +66,12 @@ wss.on('connection', (ws) => {
         if (ws._roomId && rooms.has(ws._roomId)) {
             const room = rooms.get(ws._roomId);
             room.clients.delete(ws);
-            if (room.clients.size === 0) rooms.delete(ws._roomId);
+
+            // LOGICA DI KILL: Se la stanza è vuota O se chi è uscito era l'Host
+            if (room.clients.size === 0 || ws._id === room.hostId) {
+                console.log(`[CLEANUP] Stanza ${ws._roomId} rimossa.`);
+                rooms.delete(ws._roomId);
+            }
             broadcastRoomList();
         }
     });
