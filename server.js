@@ -89,3 +89,7 @@ server.listen(PORT, '0.0.0.0', () => {
 process.on('uncaughtException', (err) => {
     console.error('[FATAL ERR] Eccezione non gestita:', err);
 });
+wss.on('connection', (ws) => {
+    console.log("!!! QUALCUNO SI È CONNESSO !!!"); // <--- AGGIUNGI QUESTO
+    const sessionId = Math.random().toString(36).slice(2, 10);
+    // ... resto del codice
