@@ -8,14 +8,18 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 const rooms = new Map();
 
-console.log("=== VIRUS SERVER V10 (FINAL STRUCTURE) ===");
+console.log("=== VIRUS SERVER V11 (PRODUCTION READY) ===");
 
 wss.on('connection', (ws) => {
     const sessionId = Math.random().toString(36).slice(2, 10);
     ws._id = sessionId;
     
-    // Alcuni client si aspettano l'init dentro un oggetto 'data'
-    ws.send(JSON.stringify({ type: 'init', id: sessionId, data: { id: sessionId } }));
+    // Primo contatto
+    ws.send(JSON.stringify({ 
+        type: 'init', 
+        id: sessionId, 
+        data: { id: sessionId, sessionId: sessionId } 
+    }));
 
     ws.on('message', (raw) => {
         try {
@@ -37,18 +41,29 @@ wss.on('connection', (ws) => {
                 if (!rooms.has(rName)) rooms.set(rName, new Set());
                 rooms.get(rName).add(ws);
                 
-                // MANDIAMO TUTTE LE POSSIBILI CONFERME
-                const response = { type: 'room_created', roomId: rName, id: sessionId, data: { roomId: rName, id: sessionId } };
-                ws.send(JSON.stringify(response));
-                ws.send(JSON.stringify({ ...response, type: 'room_joined' }));
-                ws.send(JSON.stringify({ ...response, type: 'create_room_success' }));
+                const responsePayload = {
+                    type: 'room_created',
+                    roomId: rName,
+                    id: sessionId,
+                    data: {
+                        roomId: rName,
+                        id: sessionId,
+                        isHost: true
+                    }
+                };
+                
+                // Inviamo tutto il necessario per sbloccare il client
+                ws.send(JSON.stringify(responsePayload));
+                ws.send(JSON.stringify({ ...responsePayload, type: 'room_joined' }));
+                ws.send(JSON.stringify({ ...responsePayload, type: 'create_room_success' }));
+                console.log(`[HOST] Stanza ${rName} pronta.`);
             }
 
             if (msg.type === 'v2_hello') {
                 const rName = msg.roomId || msg.data?.roomId || ws._roomId;
                 
-                // STRUTTURA WELCOME COMPLETA (Spesso necessaria per sbloccare l'host)
-                ws.send(JSON.stringify({
+                // Risposta WELCOME ultra-nidificata
+                const welcome = {
                     type: 'v2_welcome',
                     roomId: rName,
                     id: sessionId,
@@ -58,21 +73,33 @@ wss.on('connection', (ws) => {
                         roomId: rName,
                         playerId: sessionId,
                         isHost: true,
-                        players: Array.from(rooms.get(rName) || []).map(p => ({ id: p._id, name: "Player" }))
+                        roomConfig: { maxPlayers: 4 },
+                        players: Array.from(rooms.get(rName) || []).map(p => ({ 
+                            id: p._id, 
+                            playerId: p._id, 
+                            name: "Survivor" 
+                        }))
                     }
-                }));
-                console.log(`[HANDSHAKE] Inviato Welcome a Host`);
+                };
+                ws.send(JSON.stringify(welcome));
             }
 
-        } catch (e) { console.error(e); }
+            if (msg.type === 'leave_room') {
+                cleanup(ws);
+            }
+
+        } catch (e) { console.error("Error:", e); }
     });
 
-    ws.on('close', () => {
-        if (ws._roomId && rooms.has(ws._roomId)) {
-            rooms.get(ws._roomId).delete(ws);
-            if (rooms.get(ws._roomId).size === 0) rooms.delete(ws._roomId);
-        }
-    });
+    ws.on('close', () => cleanup(ws));
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`=== ONLINE SULLA ${PORT} ===`));
+function cleanup(ws) {
+    if (ws._roomId && rooms.has(ws._roomId)) {
+        rooms.get(ws._roomId).delete(ws);
+        if (rooms.get(ws._roomId).size === 0) rooms.delete(ws._roomId);
+        console.log(`[CLEANUP] Uscita da ${ws._roomId}`);
+    }
+}
+
+server.listen(PORT, '0.0.0.0', () => console.log(`=== SERVER RUNNING ON PORT ${PORT} ===`));
