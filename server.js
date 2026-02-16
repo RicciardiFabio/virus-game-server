@@ -2,11 +2,11 @@ import { WebSocketServer } from 'ws';
 import http from 'http';
 
 const PORT = process.env.PORT || 8080;
-const server = http.createServer((req, res) => { res.writeHead(200); res.end("VIRUS-0 SERVER V22"); });
+const server = http.createServer((req, res) => { res.writeHead(200); res.end("VIRUS-0 V23"); });
 const wss = new WebSocketServer({ server });
 const rooms = new Map();
 
-console.log("=== SERVER V22: METEO & SYNC READY ===");
+console.log("=== SERVER V23: READY FOR LOBBY & ARENA ===");
 
 wss.on('connection', (ws) => {
     const sessionId = Math.random().toString(36).slice(2, 10);
@@ -17,19 +17,20 @@ wss.on('connection', (ws) => {
         try {
             const msg = JSON.parse(raw.toString());
 
-            // --- LOBBY: Solo stanze con giocatori ---
+            // 1. GESTIONE LOBBY (Sempre visibile)
             if (msg.type === 'get_rooms') {
-                const list = Array.from(rooms.entries())
-                    .filter(([_, r]) => r.clients.size > 0)
-                    .map(([id, r]) => ({
-                        id, name: id, playerCount: r.clients.size
-                    }));
+                const list = Array.from(rooms.entries()).map(([id, r]) => ({
+                    id: id, 
+                    roomId: id,
+                    name: id, 
+                    playerCount: r.clients.size 
+                }));
                 ws.send(JSON.stringify({ type: 'rooms_list', rooms: list, data: list }));
                 return;
             }
 
-            // --- CREAZIONE / JOIN ---
-            if (msg.type === 'create_room' || msg.type === 'v2_hello' || msg.type === 'v2_join') {
+            // 2. CREAZIONE / JOIN (Unificata e immediata)
+            if (msg.type === 'create_room' || msg.type === 'v2_hello' || msg.type === 'v2_join' || msg.type === 'join_room') {
                 const rName = msg.roomId || msg.roomName || "SECTOR-1";
                 ws._roomId = rName;
                 ws._name = msg.name || "Agent";
@@ -38,8 +39,8 @@ wss.on('connection', (ws) => {
                     rooms.set(rName, { 
                         clients: new Set(), 
                         hostId: sessionId,
-                        gameStarted: false,
-                        weather: ['CLEAR', 'STORM', 'ACID_RAIN'][Math.floor(Math.random() * 3)]
+                        weather: ['CLEAR', 'STORM', 'ACID_RAIN'][Math.floor(Math.random() * 3)],
+                        seed: Math.random()
                     });
                     ws._isHost = true;
                 }
@@ -47,50 +48,43 @@ wss.on('connection', (ws) => {
                 const room = rooms.get(rName);
                 room.clients.add(ws);
 
-                // Aggiorniamo l'host se quello vecchio se n'è andato
-                if (!Array.from(room.clients).some(c => c._id === room.hostId)) {
-                    room.hostId = sessionId;
-                    ws._isHost = true;
-                }
-
+                // Conferma al giocatore
                 ws.send(JSON.stringify({
                     type: 'v2_welcome',
                     roomId: rName,
                     isHost: ws._id === room.hostId,
                     hostId: room.hostId,
-                    players: Array.from(room.clients).map(c => ({ id: c._id, name: c._name }))
+                    players: Array.from(room.clients).map(c => ({ id: c._id, name: c._name })),
+                    // Mandiamo anche i dati meteo già ora per sicurezza
+                    config: { weather: room.weather, seed: room.seed }
                 }));
 
                 // Notifica agli altri
-                const joinAnnounce = JSON.stringify({ type: 'v2_join', _from: ws._id, name: ws._name });
-                room.clients.forEach(c => { if(c !== ws) c.send(joinAnnounce); });
+                const announce = JSON.stringify({ type: 'v2_join', _from: ws._id, name: ws._name });
+                room.clients.forEach(c => { if(c !== ws) c.send(announce); });
             }
 
-            // --- START PARTITA (SINCRONIZZATA) ---
+            // 3. START GAME (Solo l'host e con almeno 2 giocatori)
             if (msg.type === 'v2_start') {
                 const room = rooms.get(ws._roomId);
-                if (room && ws._id === room.hostId && room.clients.size >= 2) {
-                    console.log(`[START] Stanza ${ws._roomId} avviata con meteo: ${room.weather}`);
-                    
+                if (room && ws._id === room.hostId) {
                     const startData = JSON.stringify({ 
                         type: 'v2_start',
                         config: {
                             weather: room.weather,
-                            seed: Math.random(),
+                            seed: room.seed,
                             powerUps: [
-                                { id: 1, type: 'SPEED', x: 200, y: 300 },
-                                { id: 2, type: 'SHIELD', x: 500, y: 100 }
+                                { id: 1, type: 'SPEED', x: Math.random() * 800, y: Math.random() * 600 },
+                                { id: 2, type: 'SHIELD', x: Math.random() * 800, y: Math.random() * 600 }
                             ]
                         }
                     });
-                    
-                    room.gameStarted = true;
                     room.clients.forEach(c => c.send(startData));
                 }
             }
 
-            // --- RELAY STATO ---
-            if (msg.type === 'v2_state') {
+            // 4. MOVIMENTI & STATO
+            if (msg.type === 'v2_state' || msg.type === 'move') {
                 const room = rooms.get(ws._roomId);
                 if (room) {
                     const payload = JSON.stringify({ ...msg, _from: ws._id });
@@ -98,16 +92,21 @@ wss.on('connection', (ws) => {
                 }
             }
 
-        } catch (e) { console.error(e); }
+        } catch (e) { console.error("Error:", e); }
     });
 
     ws.on('close', () => {
         if (ws._roomId && rooms.has(ws._roomId)) {
             const room = rooms.get(ws._roomId);
             room.clients.delete(ws);
-            if (room.clients.size === 0) {
-                rooms.delete(ws._roomId);
-                console.log(`[CLEANUP] Stanza ${ws._roomId} eliminata.`);
+            if (room.clients.size === 0) rooms.delete(ws._roomId);
+            else if (ws._id === room.hostId) {
+                // Passa l'host al prossimo se l'host esce
+                const nextHost = room.clients.values().next().value;
+                if (nextHost) {
+                    room.hostId = nextHost._id;
+                    nextHost.send(JSON.stringify({ type: 'v2_host', hostId: room.hostId }));
+                }
             }
         }
     });
