@@ -1,16 +1,17 @@
-// 1. USA LA PORTA DI RAILWAY (QUESTO È IL SEGRETO)
+import { Server } from "socket.io";
+import http from "http";
+
+// 1. Usa la porta dinamica di Railway
 const PORT = process.env.PORT || 8080;
 
-const io = require('socket.io')(PORT, {
+// 2. Crea un server HTTP (necessario per ES Modules con Socket.io su molte piattaforme)
+const httpServer = http.createServer();
+
+const io = new Server(httpServer, {
   cors: {
-    origin: "*", // Permette al gioco di connettersi
-    methods: ["GET", "POST"],
-    credentials: true
-  },
-  // Aggiungi queste per stabilità su Railway
-  allowEIO3: true,
-  pingTimeout: 60000,
-  pingInterval: 25000
+    origin: "*", 
+    methods: ["GET", "POST"]
+  }
 });
 
 const rooms = {};
@@ -45,7 +46,7 @@ io.on('connection', (socket) => {
 
   socket.on('v2_state', (data) => {
     if (!data.roomId) return;
-    // Rimbalza i dati a tutti gli altri (fondamentale per vedere Virus e Player)
+    // Broadcast fondamentale
     socket.to(data.roomId).emit('v2_state', {
       ...data,
       _from: socket.id 
@@ -62,7 +63,6 @@ io.on('connection', (socket) => {
         if (remaining.length > 0) {
           rooms[roomId].hostId = remaining[0];
           io.to(remaining[0]).emit('v2_welcome', { isHost: true, hostId: remaining[0] });
-          console.log(`Nuovo host per ${roomId}: ${remaining[0]}`);
         } else {
           delete rooms[roomId];
         }
@@ -71,4 +71,7 @@ io.on('connection', (socket) => {
   });
 });
 
-console.log(`Server Multiplayer V28 attivo sulla porta ${PORT}`);
+// 3. Avvia il server sulla porta corretta
+httpServer.listen(PORT, () => {
+  console.log(`Server Multiplayer V28 (ESM) attivo sulla porta ${PORT}`);
+});
