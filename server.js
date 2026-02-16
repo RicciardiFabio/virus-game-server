@@ -6,30 +6,19 @@ const server = http.createServer((req, res) => { res.writeHead(200); res.end("OK
 const wss = new WebSocketServer({ server });
 const rooms = new Map();
 
-console.log("=== VIRUS SERVER V14 (SYNC FIX) ===");
-
 wss.on('connection', (ws) => {
     const sessionId = Math.random().toString(36).slice(2, 10);
     ws._id = sessionId;
-    ws.send(JSON.stringify({ type: 'init', id: sessionId, data: { id: sessionId } }));
 
     ws.on('message', (raw) => {
         try {
             const msg = JSON.parse(raw.toString());
-            console.log(`[${msg.type}] da ${ws._id}`);
+            const type = msg.type || msg.data?.type;
+            console.log(`[EVENTO] ${type} da ${ws._id}`);
 
-            // 1. LISTA STANZE - Formato ancora più compatibile
-            if (msg.type === 'get_rooms') {
-                const list = Array.from(rooms.entries()).map(([id, clients]) => ({
-                    id: id, roomId: id, name: id, 
-                    playerCount: clients.size, maxPlayers: 4
-                }));
-                ws.send(JSON.stringify({ type: 'rooms_list', rooms: list, data: list }));
-            }
-
-            // 2. CREATE / JOIN - Gestiamoli insieme per evitare conflitti
-            if (msg.type === 'create_room' || msg.type === 'v2_join' || msg.type === 'join_room') {
-                const rName = msg.roomName || msg.roomId || msg.data?.roomId || "AUTO";
+            // 1. GESTIONE STANZE (Create/Join/Hello)
+            if (type === 'create_room' || type === 'v2_join' || type === 'v2_hello') {
+                const rName = msg.roomName || msg.roomId || msg.data?.roomId || ws._roomId || "MASTER";
                 ws._roomId = rName;
                 
                 if (!rooms.has(rName)) {
@@ -38,56 +27,46 @@ wss.on('connection', (ws) => {
                 }
                 rooms.get(rName).add(ws);
 
-                // Risposta "Tutto in uno" per sbloccare qualsiasi client
-                const res = {
-                    type: ws._isHost ? 'room_created' : 'room_joined',
+                // CREIAMO UN PAYLOAD UNIVERSALE (Sia piatto che nidificato)
+                const payload = {
+                    type: type === 'create_room' ? 'room_created' : 'v2_welcome',
                     roomId: rName,
                     id: sessionId,
-                    data: { roomId: rName, id: sessionId, isHost: ws._isHost || false, success: true }
-                };
-                
-                ws.send(JSON.stringify(res));
-                ws.send(JSON.stringify({ ...res, type: 'v2_joined' }));
-                ws.send(JSON.stringify({ ...res, type: 'create_room_success' }));
-                console.log(`[ROOM] ${ws._id} -> ${rName} (Host: ${ws._isHost || false})`);
-            }
-
-            // 3. HANDSHAKE V2 - Forza lo stato di "In Gioco"
-            if (msg.type === 'v2_hello') {
-                const rName = ws._roomId || "LOBBY";
-                const playersInRoom = Array.from(rooms.get(rName) || []).map(p => ({
-                    id: p._id,
-                    name: "Survivor",
-                    isHost: p._isHost || false
-                }));
-
-                ws.send(JSON.stringify({
-                    type: 'v2_welcome',
-                    roomId: rName,
-                    id: ws._id,
-                    data: { 
-                        roomId: rName, 
+                    playerId: sessionId,
+                    isHost: ws._isHost || false,
+                    success: true,
+                    players: Array.from(rooms.get(rName)).map(p => ({ id: p._id })),
+                    data: {
+                        type: type === 'create_room' ? 'room_created' : 'v2_welcome',
+                        roomId: rName,
+                        playerId: sessionId,
                         isHost: ws._isHost || false,
-                        players: playersInRoom,
-                        gameState: 'waiting'
+                        success: true,
+                        players: Array.from(rooms.get(rName)).map(p => ({ id: p._id }))
                     }
-                }));
+                };
+
+                // SPARIAMO TUTTI I TIPI DI RISPOSTA POSSIBILI
+                const jsonResponse = JSON.stringify(payload);
+                ws.send(jsonResponse);
+                ws.send(JSON.stringify({ ...payload, type: 'room_joined' }));
+                ws.send(JSON.stringify({ ...payload, type: 'create_room_success' }));
+                ws.send(JSON.stringify({ ...payload, type: 'v2_welcome' }));
                 
-                // Se ci sono 2 o più persone, mandiamo un segnale di START facoltativo
-                if (playersInRoom.length >= 2) {
-                    ws.send(JSON.stringify({ type: 'v2_start_game', roomId: rName }));
+                // Se siamo in due, avvisa l'altro!
+                if (rooms.get(rName).size > 1) {
+                    rooms.get(rName).forEach(client => {
+                        if (client !== ws) {
+                            client.send(JSON.stringify({ type: 'player_joined', newPlayer: sessionId }));
+                        }
+                    });
                 }
             }
 
-        } catch (e) { console.error("Errore"); }
+        } catch (e) { console.log("Errore:", e); }
     });
 
-    ws.on('close', () => {
-        if (ws._roomId && rooms.has(ws._roomId)) {
-            rooms.get(ws._roomId).delete(ws);
-            if (rooms.get(ws._roomId).size === 0) rooms.delete(ws._roomId);
-        }
-    });
+    ws.on('close', () => { /* cleanup */ });
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`=== ONLINE PORT ${PORT} ===`));
+server.listen(PORT, '0.0.0.0', () => console.log("SERVER V15 ONLINE"));
