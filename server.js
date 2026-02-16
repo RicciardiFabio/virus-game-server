@@ -1,13 +1,8 @@
-wss.on('connection', (ws) => {
-    console.log("!!! QUALCUNO SI È CONNESSO !!!"); // <--- AGGIUNGI QUESTO
-    const sessionId = Math.random().toString(36).slice(2, 10);
-
-    
-    import { WebSocketServer } from 'ws';
+import { WebSocketServer } from 'ws';
 import http from 'http';
 
-// Forziamo la 8080 visto che Railway si aspetta quella
-const PORT = 8080; 
+// Usiamo la porta 8080 come indicato dal tuo pannello Railway
+const PORT = process.env.PORT || 8080; 
 
 const server = http.createServer((req, res) => { 
     // Risposta per l'Health Check di Railway
@@ -18,14 +13,16 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 const rooms = new Map();
 
-console.log("=== VIRUS SERVER V6 (ESM) STARTING ===");
+console.log("=== VIRUS SERVER V7 STARTING ===");
 
 wss.on('connection', (ws) => {
+    // LOG FONDAMENTALE PER VEDERE SE IL CLIENT ARRIVA
+    console.log("!!! QUALCUNO SI È CONNESSO !!!");
+    
     const sessionId = Math.random().toString(36).slice(2, 10);
     ws._id = sessionId;
-    console.log(`[CONN] Client connesso: ${sessionId}`);
     
-    // Mandiamo l'ID iniziale
+    // Mandiamo l'ID iniziale immediatamente
     ws.send(JSON.stringify({ type: 'init', id: sessionId }));
 
     ws.on('message', (raw) => {
@@ -35,16 +32,13 @@ wss.on('connection', (ws) => {
         try {
             const data = JSON.parse(messageString);
             
-            // Gestione GET_ROOMS
             if (data.type === 'get_rooms') {
                 const list = Array.from(rooms.entries()).map(([id, r]) => ({
                     id, name: id, playerCount: r.size
                 }));
                 ws.send(JSON.stringify({ type: 'rooms_list', rooms: list }));
-                console.log(`[INFO] Inviata lista stanze a ${ws._id}`);
             }
 
-            // Gestione CREATE_ROOM / JOIN
             if (data.type === 'create_room') {
                 const rName = data.roomName || "SECTOR_" + Math.random().toString(36).slice(2, 7).toUpperCase();
                 ws._roomId = rName;
@@ -54,44 +48,34 @@ wss.on('connection', (ws) => {
                 }
                 rooms.get(rName).add(ws);
                 
-                console.log(`[ROOM] Stanza creata/unita: ${rName} (Totale player: ${rooms.get(rName).size})`);
+                console.log(`[ROOM] Stanza: ${rName} | Player: ${rooms.get(rName).size}`);
                 
-                // Inviamo conferme multiple per sbloccare il client
-                const payload = { 
+                const payload = JSON.stringify({ 
                     type: 'room_created', 
                     roomId: rName, 
-                    id: sessionId,
-                    data: { roomId: rName } 
-                };
+                    id: sessionId 
+                });
                 
-                ws.send(JSON.stringify(payload));
-                ws.send(JSON.stringify({ ...payload, type: 'create_room_success' }));
-                ws.send(JSON.stringify({ ...payload, type: 'room_joined' }));
+                ws.send(payload);
+                ws.send(JSON.stringify({ type: 'create_room_success', roomId: rName }));
             }
         } catch (e) {
-            console.error("[ERR] Errore nel parsing del messaggio:", e);
+            console.error("[ERR] Parsing error:", e);
         }
     });
 
     ws.on('close', () => {
-        console.log(`[DISC] Client ${ws._id} disconnesso`);
+        console.log(`[DISC] Client ${ws._id} uscito`);
         if (ws._roomId && rooms.has(ws._roomId)) {
             rooms.get(ws._roomId).delete(ws);
-            if (rooms.get(ws._roomId).size === 0) {
-                rooms.delete(ws._roomId);
-                console.log(`[ROOM] Stanza ${ws._roomId} eliminata (vuota)`);
-            }
         }
     });
 });
 
-// Fondamentale: usa '0.0.0.0' e la variabile PORT
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`=== SERVER ONLINE FISSO SU PORTA ${PORT} ===`);
+    console.log(`=== SERVER ONLINE SU PORTA ${PORT} ===`);
 });
 
-// Aggiungi questo per evitare che il processo si chiuda improvvisamente
 process.on('uncaughtException', (err) => {
-    console.error('[FATAL ERR] Eccezione non gestita:', err);
+    console.error('[FATAL] Exception:', err);
 });
-}
