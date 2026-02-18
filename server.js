@@ -54,10 +54,9 @@ io.on('connection', (socket) => {
   });
 
   // --- CORREZIONE SYNC QUI ---
-  socket.on('v2_state', (data) => {
+socket.on('v2_state', (data) => {
     if (data.roomId && rooms[data.roomId]) {
-      // Broadcast a tutti tranne al mittente
-      // Aggiungiamo _from per far capire al client chi sta parlando
+      // Inoltriamo tutto, assicurandoci che _from sia l'ID univoco del socket
       socket.to(data.roomId).emit('v2_state', { 
         ...data, 
         _from: socket.id 
