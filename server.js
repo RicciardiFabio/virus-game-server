@@ -5,7 +5,7 @@ const PORT = process.env.PORT || 8080;
 
 const httpServer = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('SERVER MULTIPLAYER V28.4: SYNC ACTIVE');
+  res.end('SERVER MULTIPLAYER V29.0: SYNC ACTIVE');
 });
 
 const io = new Server(httpServer, {
