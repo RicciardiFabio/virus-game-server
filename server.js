@@ -4,64 +4,104 @@ import http from "http";
 const PORT = process.env.PORT || 8080;
 
 const httpServer = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('SERVER MULTIPLAYER V29.0: SYNC ACTIVE');
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("SERVER MULTIPLAYER V29.1: ROOM LIFECYCLE FIX");
 });
 
 const io = new Server(httpServer, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  transports: ['websocket', 'polling']
+  transports: ["websocket", "polling"]
 });
 
 const rooms = {};
 
 console.log(`[START] Server avviato sulla porta ${PORT}`);
 
-const leaveRoom = (socket, roomId) => {
+const closeRoom = (roomId, reason = "closed") => {
   if (!roomId || !rooms[roomId]) return;
-  if (!rooms[roomId].players[socket.id]) {
-    socket.leave(roomId);
-    return;
-  }
 
-  delete rooms[roomId].players[socket.id];
-  socket.leave(roomId);
+  const socketIds = Object.keys(rooms[roomId].players);
 
-  const remainingPlayers = Object.keys(rooms[roomId].players);
+  io.to(roomId).emit("room_closed", { roomId, reason });
 
-  if (remainingPlayers.length === 0) {
-    delete rooms[roomId];
-    return;
-  }
-
-  if (rooms[roomId].hostId === socket.id) {
-    const newHostId = remainingPlayers[0];
-    rooms[roomId].hostId = newHostId;
-    rooms[roomId].players[newHostId].isHost = true;
-    io.to(roomId).emit('v2_host', {
-      hostId: newHostId,
-      players: Object.values(rooms[roomId].players)
-    });
-  }
-
-  io.to(roomId).emit('player_left', { playerId: socket.id });
-};
-
-io.on('connection', (socket) => {
-  console.log(`[CONN] ${socket.id}`);
-
-  socket.on('get_rooms', () => {
-    const activeRooms = Object.keys(rooms).map(id => ({
-      id: id,
-      playerCount: Object.keys(rooms[id].players).length
-    }));
-    socket.emit('rooms_list', activeRooms);
+  socketIds.forEach((sid) => {
+    const s = io.sockets.sockets.get(sid);
+    if (!s) return;
+    s.leave(roomId);
+    if (s.data.currentRoomId === roomId) {
+      s.data.currentRoomId = null;
+    }
   });
 
-  socket.on('v2_hello', (data) => {
-    const { roomId, name } = data;
+  delete rooms[roomId];
+};
+
+const leaveRoom = (socket, roomId) => {
+  const targetRoomId = roomId || socket.data.currentRoomId;
+  if (!targetRoomId) return;
+
+  if (!rooms[targetRoomId]) {
+    socket.leave(targetRoomId);
+    if (socket.data.currentRoomId === targetRoomId) {
+      socket.data.currentRoomId = null;
+    }
+    return;
+  }
+
+  const room = rooms[targetRoomId];
+  const wasHost = room.hostId === socket.id;
+
+  if (!room.players[socket.id]) {
+    socket.leave(targetRoomId);
+    if (socket.data.currentRoomId === targetRoomId) {
+      socket.data.currentRoomId = null;
+    }
+    return;
+  }
+
+  delete room.players[socket.id];
+  socket.leave(targetRoomId);
+  if (socket.data.currentRoomId === targetRoomId) {
+    socket.data.currentRoomId = null;
+  }
+
+  if (wasHost) {
+    closeRoom(targetRoomId, "host_left");
+    return;
+  }
+
+  const remainingPlayers = Object.keys(room.players);
+  if (remainingPlayers.length === 0) {
+    delete rooms[targetRoomId];
+    return;
+  }
+
+  io.to(targetRoomId).emit("player_left", { playerId: socket.id });
+};
+
+io.on("connection", (socket) => {
+  socket.data.currentRoomId = null;
+  console.log(`[CONN] ${socket.id}`);
+
+  socket.on("get_rooms", () => {
+    const activeRooms = Object.keys(rooms).map((id) => ({
+      id,
+      playerCount: Object.keys(rooms[id].players).length
+    }));
+    socket.emit("rooms_list", activeRooms);
+  });
+
+  socket.on("v2_hello", (data) => {
+    const roomId = data?.roomId;
+    const name = data?.name;
     if (!roomId) return;
+
+    if (socket.data.currentRoomId && socket.data.currentRoomId !== roomId) {
+      leaveRoom(socket, socket.data.currentRoomId);
+    }
+
     socket.join(roomId);
+    socket.data.currentRoomId = roomId;
 
     if (!rooms[roomId]) {
       rooms[roomId] = { hostId: socket.id, players: {} };
@@ -69,11 +109,12 @@ io.on('connection', (socket) => {
 
     const existing = rooms[roomId].players[socket.id];
     const isHost = rooms[roomId].hostId === socket.id;
+
     rooms[roomId].players[socket.id] = existing
       ? { ...existing, name: name || existing.name || "Player", isHost }
       : { id: socket.id, name: name || "Player", isHost };
 
-    socket.emit('v2_welcome', {
+    socket.emit("v2_welcome", {
       isHost,
       myAssignedId: socket.id,
       hostId: rooms[roomId].hostId,
@@ -81,43 +122,44 @@ io.on('connection', (socket) => {
     });
 
     if (!existing) {
-      socket.to(roomId).emit('v2_player_joined', rooms[roomId].players[socket.id]);
+      socket.to(roomId).emit("v2_player_joined", rooms[roomId].players[socket.id]);
     }
   });
 
-  socket.on('v2_state', (data) => {
-    if (data.roomId && rooms[data.roomId]) {
-      const payload = {
-        ...data,
-        _from: socket.id
-      };
+  socket.on("v2_state", (data) => {
+    const roomId = data?.roomId;
+    if (!roomId || !rooms[roomId] || !rooms[roomId].players[socket.id]) return;
 
-      // I collect devono arrivare anche al sender per conferma visiva immediata.
-      if (data.type === 'v2_collect_item') {
-        io.to(data.roomId).emit('v2_state', payload);
-      } else {
-        socket.to(data.roomId).emit('v2_state', payload);
-      }
+    const payload = { ...data, _from: socket.id };
+
+    if (data.type === "v2_collect_item") {
+      io.to(roomId).emit("v2_state", payload);
+    } else {
+      socket.to(roomId).emit("v2_state", payload);
     }
   });
 
-  socket.on('v2_start', (data) => {
-    if (rooms[data.roomId] && rooms[data.roomId].hostId === socket.id) {
-      console.log(`[GAME_START] Stanza ${data.roomId}`);
-      io.to(data.roomId).emit('v2_start');
+  socket.on("v2_start", (data) => {
+    const roomId = data?.roomId;
+    if (roomId && rooms[roomId] && rooms[roomId].hostId === socket.id) {
+      console.log(`[GAME_START] Stanza ${roomId}`);
+      io.to(roomId).emit("v2_start");
     }
   });
 
-  socket.on('leave_room', (data) => {
-    leaveRoom(socket, data?.roomId);
+  socket.on("v2_end", (data) => {
+    const roomId = data?.roomId || socket.data.currentRoomId;
+    if (roomId && rooms[roomId] && rooms[roomId].hostId === socket.id) {
+      closeRoom(roomId, data?.reason || "game_finished");
+    }
   });
 
-  socket.on('disconnect', () => {
-    for (const roomId in rooms) {
-      if (rooms[roomId].players[socket.id]) {
-        leaveRoom(socket, roomId);
-      }
-    }
+  socket.on("leave_room", (data) => {
+    leaveRoom(socket, data?.roomId || socket.data.currentRoomId);
+  });
+
+  socket.on("disconnect", () => {
+    leaveRoom(socket, socket.data.currentRoomId);
   });
 });
 
