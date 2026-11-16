@@ -1,7 +1,16 @@
 import { Server } from "socket.io";
 import http from "http";
+import crypto from "crypto";
 
 const PORT = process.env.PORT || 8080;
+
+// Classifiche interne HobbyGame. Il server firma ogni risultato con HMAC:
+// se le variabili non sono configurate il gioco resta identico e il
+// salvataggio viene dichiarato "skipped", senza inventare esiti.
+const SCORES_URL = (process.env.HG_SCORES_URL || "").trim();
+const SCORES_SECRET = (process.env.HG_SCORES_SECRET || "").trim();
+const SCORES_TIMEOUT_MS = 8000;
+const SCORES_MAX_TENTATIVI = 3;
 
 // Origini autorizzate: il gioco pubblico e i collaudi locali. Si possono
 // ampliare con la variabile CORS_ORIGINS, senza aprire il server a tutti.
@@ -59,7 +68,7 @@ const MAX_ROOMS = 200;
 
 // Dopo una caduta di rete la stanza resta in piedi per un minuto: chi rientra
 // ritrova il proprio stato, chi non rientra libera il posto.
-const RECONNECT_GRACE_MS = 60000;
+const RECONNECT_GRACE_MS = Number(process.env.HG_RECONNECT_GRACE_MS || 60000);
 
 // Il client invia 20 pacchetti al secondo: il tetto resta piu' alto del normale.
 const RATE_WINDOW_MS = 1000;
@@ -105,6 +114,194 @@ const playerList = (room) => Object.keys(room.players)
   .filter((p) => p.connected !== false)
   .map((p) => ({ id: p.id, name: p.name, isHost: p.key === room.hostKey }));
 
+// Infezioni decise dall'host. Si conservano sia gli identificativi ricevuti
+// (servono ai client per mostrare i bot infetti) sia la chiave stabile dei
+// giocatori: dopo una riconnessione l'id cambia ma la chiave no.
+const mergeHostInfections = (room, ids) => {
+  if (!Array.isArray(ids)) return;
+  for (const raw of ids.slice(0, 64)) {
+    if (typeof raw !== "string") continue;
+    const id = raw.slice(0, 64);
+    if (!id) continue;
+    room.hostInfections.add(id);
+    const chiave = Object.keys(room.players).find((k) => room.players[k].id === id);
+    if (chiave) room.infectedKeys.add(chiave);
+  }
+};
+
+// Elenco aggiornato da trasmettere: per i giocatori riconnessi vale l'id
+// corrente, per i bot restano gli id dichiarati dall'host.
+const infectionIdsFor = (room) => {
+  const ids = new Set(room.hostInfections);
+  for (const chiave of room.infectedKeys) {
+    const p = room.players[chiave];
+    if (p) ids.add(p.id);
+  }
+  const elenco = Array.from(ids);
+  return elenco.length > 64 ? elenco.slice(0, 64) : elenco;
+};
+
+const notificaSalvataggio = (roomId, resultId, status, messaggio) => {
+  const room = rooms[roomId];
+  if (room && room.result && room.result.resultId === resultId) {
+    room.result.saveStatus = status;
+    room.resultSaved = status;
+  }
+  io.to(roomId).emit("v2_result_saved", { resultId, status, message: messaggio || undefined });
+};
+
+// Il plugin WordPress accetta soltanto il contratto pubblico documentato:
+// modalita' "multi", data ISO 8601 UTC e nomi degli esiti in italiano.
+// La conversione avviene qui, in un unico punto, per non duplicarla nei client.
+const ESITI_CLASSIFICA = {
+  VICTORY: "vittoria",
+  INFECTED: "infetto",
+  DEFEAT: "sconfitta",
+  DISCONNECTED: "disconnesso"
+};
+
+const dataIsoClassifica = (ms) => {
+  const data = new Date(Number(ms) || Date.now());
+  return data.toISOString().replace(/\.\d{3}Z$/, "Z");
+};
+
+// Invio idempotente: il plugin riconosce resultId gia' presente e risponde
+// "duplicate", che per noi equivale a un salvataggio riuscito.
+const inviaRisultatoClassifica = async (roomId, result, tentativo) => {
+  if (!SCORES_URL || !SCORES_SECRET) {
+    notificaSalvataggio(roomId, result.resultId, "skipped", "Classifiche non configurate");
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SCORES_TIMEOUT_MS);
+  if (timeout.unref) timeout.unref();
+
+  try {
+    const outcomes = Array.isArray(result.outcomes)
+      ? result.outcomes.slice(0, 16).map((o) => ({
+        player: String((o && o.name) || "Player").slice(0, 64),
+        esito: ESITI_CLASSIFICA[o && o.outcome] || "sconfitta"
+      }))
+      : [];
+    const body = JSON.stringify({
+      resultId: result.resultId,
+      roomId: result.roomId,
+      game: result.game,
+      mode: "multi",
+      winner: typeof result.winner === "string" ? result.winner : "",
+      matchSeq: result.matchSeq,
+      startedAt: dataIsoClassifica(result.startedAt),
+      durationSec: result.durationSec,
+      survivors: result.survivors,
+      infected: result.infected,
+      outcomes
+    });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const path = new URL(SCORES_URL).pathname;
+    const firma = crypto.createHmac("sha256", SCORES_SECRET)
+      .update(`${timestamp}\nPOST\n${path}\n${body}`)
+      .digest("hex");
+
+    const risposta = await fetch(SCORES_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-HG-Timestamp": String(timestamp),
+        "X-HG-Signature": firma
+      },
+      body,
+      signal: controller.signal
+    });
+
+    if (risposta.ok) {
+      notificaSalvataggio(roomId, result.resultId, "saved");
+      return;
+    }
+    throw new Error(`HTTP ${risposta.status}`);
+  } catch (errore) {
+    if (tentativo < SCORES_MAX_TENTATIVI) {
+      const attesa = setTimeout(() => {
+        inviaRisultatoClassifica(roomId, result, tentativo + 1);
+      }, tentativo * 2500);
+      if (attesa.unref) attesa.unref();
+      return;
+    }
+    console.warn(`[SCORES] Invio non riuscito dopo ${SCORES_MAX_TENTATIVI} tentativi: ${errore && errore.message}`);
+    notificaSalvataggio(roomId, result.resultId, "error");
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+// Calcolo autoritativo dell'esito: un solo evento v2_result per partita.
+const concludiPartita = (room) => {
+  if (!room.started || room.finished) return null;
+  const chiavi = Object.keys(room.participants);
+  if (chiavi.length === 0) return null;
+
+  // Una caduta di rete non e' un'infezione: chi resta nella stanza durante la
+  // finestra di rientro continua a far parte della partita. Conta come fuori
+  // solo chi ha abbandonato davvero (uscita esplicita o tempo scaduto).
+  const superstiti = chiavi.filter((k) => {
+    const partecipante = room.participants[k];
+    if (partecipante && partecipante.abbandonato) return false;
+    return !room.infectedKeys.has(k);
+  });
+
+  // La partita continua finche' restano almeno due giocatori in gioco.
+  if (superstiti.length > 1) return null;
+  // Una stanza avviata con un solo partecipante non termina con una vittoria
+  // automatica: si chiude soltanto se non resta nessun sano.
+  if (superstiti.length === 1 && chiavi.length < 2) return null;
+
+  room.finished = true;
+  const startedAt = room.startedAt || Date.now();
+  const vincitoreKey = superstiti.length === 1 ? superstiti[0] : null;
+
+  const outcomes = chiavi.map((k) => {
+    const partecipante = room.participants[k] || {};
+    const p = room.players[k];
+    let outcome = "DEFEAT";
+    if (room.infectedKeys.has(k)) outcome = "INFECTED";
+    else if (partecipante.abbandonato || !p) outcome = "DISCONNECTED";
+    else if (k === vincitoreKey) outcome = "VICTORY";
+    return {
+      id: (p && p.id) || partecipante.id || k,
+      name: (p && p.name) || partecipante.name || "Player",
+      outcome
+    };
+  });
+
+  const nomeVincitore = vincitoreKey
+    ? ((room.players[vincitoreKey] && room.players[vincitoreKey].name)
+      || (room.participants[vincitoreKey] && room.participants[vincitoreKey].name)
+      || null)
+    : null;
+
+  const result = {
+    resultId: `${room.id}:${startedAt}`,
+    roomId: room.id,
+    game: "virus-0",
+    mode: "multiplayer",
+    winner: nomeVincitore,
+    matchSeq: room.matchSeq,
+    startedAt,
+    durationSec: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+    survivors: superstiti.length,
+    infected: chiavi.filter((k) => room.infectedKeys.has(k)).length,
+    outcomes,
+    saveStatus: "pending"
+  };
+
+  room.result = result;
+  room.resultId = result.resultId;
+  io.to(room.id).emit("v2_result", result);
+  console.log(`[RESULT] Stanza ${room.id} partita ${room.matchSeq}: superstiti ${result.survivors}, vincitore ${result.winner || "nessuno"}`);
+  inviaRisultatoClassifica(room.id, result, 1);
+  return result;
+};
+
 console.log(`[START] Server avviato sulla porta ${PORT}`);
 
 const closeRoom = (roomId, reason = "closed") => {
@@ -139,6 +336,14 @@ const removePlayer = (roomId, key, reason = "left", notify = true) => {
 
   if (player.timer) { clearTimeout(player.timer); player.timer = null; }
 
+  // L'uscita definitiva va registrata prima di eliminare il giocatore: cosi'
+  // l'esito distingue un abbandono reale da una semplice caduta di rete.
+  const partecipante = room.participants && room.participants[key];
+  if (partecipante) {
+    partecipante.abbandonato = true;
+    partecipante.abbandonatoIl = Date.now();
+  }
+
   delete room.players[key];
   delete room.states[key];
 
@@ -155,6 +360,10 @@ const removePlayer = (roomId, key, reason = "left", notify = true) => {
   }
 
   if (notify) io.to(roomId).emit("player_left", { playerId: player.id });
+
+  // Un giocatore che non rientra lascia la partita: se ne resta uno solo,
+  // il server chiude comunque l'esito con un unico risultato.
+  if (room.started && !room.finished) concludiPartita(room);
 
   if (Object.keys(room.players).length === 0) {
     delete rooms[roomId];
@@ -253,7 +462,16 @@ io.on("connection", (socket) => {
         players: Object.create(null),
         states: Object.create(null),
         world: null,
-        started: false
+        started: false,
+        startedAt: 0,
+        matchSeq: 0,
+        participants: Object.create(null),
+        finished: false,
+        result: null,
+        resultId: null,
+        resultSaved: null,
+        hostInfections: new Set(),
+        infectedKeys: new Set()
       };
     }
     if (Object.keys(room.players).length === 0) {
@@ -272,6 +490,11 @@ io.on("connection", (socket) => {
     room.players[key] = giocatoreEsistente
       ? { ...giocatoreEsistente, id: socket.id, name: name || giocatoreEsistente.name, connected: true, isHost: key === room.hostKey, lastSeen: Date.now() }
       : { key, id: socket.id, name: name || "Player", connected: true, isHost: key === room.hostKey, lastSeen: Date.now() };
+
+    // Chi entra a partita iniziata partecipa ufficialmente all'esito.
+    if (room.started && !room.finished && !room.participants[key]) {
+      room.participants[key] = { id: socket.id, name: room.players[key].name };
+    }
 
     const isHost = key === room.hostKey;
 
@@ -308,10 +531,17 @@ io.on("connection", (socket) => {
       socket.emit("v2_snapshot", {
         roomId,
         started: room.started,
+        startedAt: room.startedAt,
+        matchSeq: room.matchSeq,
+        finished: room.finished,
+        result: room.result,
+        hostInfections: infectionIdsFor(room),
         hostId: roomHostId(room),
         players: playerList(room),
         you: { key, id: socket.id, name: room.players[key].name },
-        player: stato ? stato.player : null,
+        player: stato
+          ? { ...stato.player, state: room.infectedKeys.has(key) ? "INFECTED" : stato.player.state }
+          : (room.infectedKeys.has(key) ? { state: "INFECTED" } : null),
         world: room.world
       });
     } else if (!giocatoreEsistente) {
@@ -366,30 +596,72 @@ io.on("connection", (socket) => {
         hazards: Array.isArray(data.hazards) ? data.hazards.slice(0, 60) : [],
         at: Date.now()
       };
+      // L'host e' l'unico arbitro delle infezioni: il server le rende
+      // definitive e le rimanda a tutti, anche dopo una riconnessione.
+      mergeHostInfections(room, data.hostInfections);
     } else {
       delete payload.isHostSync;
       delete payload.bots;
       delete payload.powerUps;
       delete payload.events;
       delete payload.hazards;
+      // Solo l'host puo' dichiarare infezioni: un ospite non deve poter
+      // infettare gli altri facendosi passare per l'arbitro.
+      delete payload.hostInfections;
+    }
+
+    if (key === room.hostKey && data.isHostSync) {
+      payload.hostInfections = infectionIdsFor(room);
     }
 
     socket.to(roomId).emit("v2_state", payload);
-  });
 
-  socket.on("v2_start", (data) => {
-    const roomId = data?.roomId;
-    if (roomId && rooms[roomId] && rooms[roomId].hostKey === socket.data.playerKey) {
-      rooms[roomId].started = true;
-      console.log(`[GAME_START] Stanza ${roomId}`);
-      io.to(roomId).emit("v2_start");
+    // Dopo ogni aggiornamento del mondo si verifica se restano superstiti.
+    // Il calcolo e' idempotente: un solo v2_result per partita.
+    if (key === room.hostKey && data.isHostSync) {
+      concludiPartita(room);
     }
   });
 
+  socket.on("v2_start", (data) => {
+    const roomId = data?.roomId || socket.data.currentRoomId;
+    const room = roomId ? rooms[roomId] : null;
+    if (!room || room.hostKey !== socket.data.playerKey) return;
+
+    room.started = true;
+    room.startedAt = Date.now();
+    room.matchSeq = (room.matchSeq || 0) + 1;
+    room.finished = false;
+    room.result = null;
+    room.resultId = null;
+    room.resultSaved = null;
+    room.states = Object.create(null);
+    room.world = null;
+    room.hostInfections = new Set();
+    room.infectedKeys = new Set();
+    room.participants = Object.create(null);
+    for (const chiave of Object.keys(room.players)) {
+      const p = room.players[chiave];
+      if (p.connected === false) continue;
+      room.participants[chiave] = { id: p.id, name: p.name };
+    }
+
+    console.log(`[GAME_START] Stanza ${roomId} partita ${room.matchSeq}`);
+    io.to(roomId).emit("v2_start", {
+      roomId,
+      startedAt: room.startedAt,
+      matchSeq: room.matchSeq,
+      players: playerList(room)
+    });
+  });
+
   socket.on("v2_end", (data) => {
+    // La fine partita e' decisa dal server: un client non puo' chiudere la
+    // stanza degli altri. L'evento resta accettato per compatibilita' e
+    // viene semplicemente registrato.
     const roomId = data?.roomId || socket.data.currentRoomId;
     if (roomId && rooms[roomId] && rooms[roomId].hostKey === socket.data.playerKey) {
-      closeRoom(roomId, data?.reason || "game_finished");
+      console.log(`[GAME_END] Stanza ${roomId}: richiesta ignorata, la stanza resta aperta`);
     }
   });
 
