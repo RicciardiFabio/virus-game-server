@@ -70,6 +70,12 @@ const MAX_ROOMS = 200;
 // ritrova il proprio stato, chi non rientra libera il posto.
 const RECONNECT_GRACE_MS = Number(process.env.HG_RECONNECT_GRACE_MS || 60000);
 
+// All'inizio di una partita i client possono avere ancora in coda un pacchetto
+// della partita precedente (con le vecchie infezioni). In questa finestra il
+// server aggiorna gli stati ma non dichiara mai conclusa la partita: evita
+// finali a pochi decimi di secondo con il vincitore sbagliato.
+const MATCH_START_GRACE_MS = Number(process.env.HG_MATCH_START_GRACE_MS || 3000);
+
 // Il client invia 20 pacchetti al secondo: il tetto resta piu' alto del normale.
 const RATE_WINDOW_MS = 1000;
 const MAX_STATE_PER_WINDOW = 60;
@@ -237,6 +243,7 @@ const inviaRisultatoClassifica = async (roomId, result, tentativo) => {
 // Calcolo autoritativo dell'esito: un solo evento v2_result per partita.
 const concludiPartita = (room) => {
   if (!room.started || room.finished) return null;
+  if (Date.now() - (room.startedAt || 0) < MATCH_START_GRACE_MS) return null;
   const chiavi = Object.keys(room.participants);
   if (chiavi.length === 0) return null;
 
@@ -560,6 +567,9 @@ io.on("connection", (socket) => {
     const room = rooms[roomId];
     const player = room && key ? room.players[key] : null;
     if (!player || player.id !== socket.id || player.connected === false) return;
+    // Una partita nuova ha una sequenza nuova: i pacchetti rimasti in coda
+    // dalla partita precedente non possono infettare la nuova.
+    if (room.started && typeof data.matchSeq === "number" && data.matchSeq !== room.matchSeq) return;
     if (typeof data.type !== "string" || data.type.length > 40) return;
     if (!rateOk(socket)) return;
 
