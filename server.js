@@ -19,6 +19,7 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || [
   "https://www.websitedefault.it",
   "https://hobby-game.it",
   "https://www.hobby-game.it",
+  "https://appassets.androidplatform.net",
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://localhost:4173",
@@ -29,6 +30,21 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || [
   .filter(Boolean);
 
 const httpServer = http.createServer((req, res) => {
+  // Risultato del giocatore singolo: il browser non possiede il segreto HMAC,
+  // quindi passa da qui. La richiesta e' validata, limitata e firmata dal server.
+  if (req.url === "/solo-result") {
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, intestazioniCors(req));
+      res.end();
+      return;
+    }
+    if (req.method === "POST") {
+      gestisciRisultatoSolo(req, res);
+      return;
+    }
+    rispondiJson(res, 405, { esito: "error", codice: "metodo_non_ammesso" }, req, { Allow: "POST, OPTIONS" });
+    return;
+  }
   // /health serve al client per risvegliare il servizio gratuito dopo la
   // sospensione: risponde appena il processo e' pronto.
   if (req.url === "/health" || req.url === "/healthz") {
@@ -171,38 +187,17 @@ const dataIsoClassifica = (ms) => {
   return data.toISOString().replace(/\.\d{3}Z$/, "Z");
 };
 
-// Invio idempotente: il plugin riconosce resultId gia' presente e risponde
-// "duplicate", che per noi equivale a un salvataggio riuscito.
-const inviaRisultatoClassifica = async (roomId, result, tentativo) => {
-  if (!SCORES_URL || !SCORES_SECRET) {
-    notificaSalvataggio(roomId, result.resultId, "skipped", "Classifiche non configurate");
-    return;
-  }
+// Firma e invia un risultato al plugin di WordPress.
+// Restituisce { esito: "saved" | "duplicate" | "skipped" | "error", messaggio? }.
+const inviaFirmata = async (payload) => {
+  if (!SCORES_URL || !SCORES_SECRET) return { esito: "skipped" };
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SCORES_TIMEOUT_MS);
   if (timeout.unref) timeout.unref();
 
   try {
-    const outcomes = Array.isArray(result.outcomes)
-      ? result.outcomes.slice(0, 16).map((o) => ({
-        player: String((o && o.name) || "Player").slice(0, 64),
-        esito: ESITI_CLASSIFICA[o && o.outcome] || "sconfitta"
-      }))
-      : [];
-    const body = JSON.stringify({
-      resultId: result.resultId,
-      roomId: result.roomId,
-      game: result.game,
-      mode: "multi",
-      winner: typeof result.winner === "string" ? result.winner : "",
-      matchSeq: result.matchSeq,
-      startedAt: dataIsoClassifica(result.startedAt),
-      durationSec: result.durationSec,
-      survivors: result.survivors,
-      infected: result.infected,
-      outcomes
-    });
+    const body = JSON.stringify(payload);
     const timestamp = Math.floor(Date.now() / 1000);
     const path = new URL(SCORES_URL).pathname;
     const firma = crypto.createHmac("sha256", SCORES_SECRET)
@@ -221,22 +216,283 @@ const inviaRisultatoClassifica = async (roomId, result, tentativo) => {
     });
 
     if (risposta.ok) {
-      notificaSalvataggio(roomId, result.resultId, "saved");
-      return;
+      let corpo = null;
+      try { corpo = await risposta.json(); } catch { corpo = null; }
+      const duplicato = !!corpo && (corpo.stato === "duplicato" || corpo.duplicate === true);
+      return { esito: duplicato ? "duplicate" : "saved" };
     }
-    throw new Error(`HTTP ${risposta.status}`);
+
+    let codice = "";
+    try {
+      const corpo = await risposta.json();
+      codice = corpo && corpo.codice ? String(corpo.codice).slice(0, 64) : "";
+    } catch { codice = ""; }
+    return { esito: "error", messaggio: `HTTP ${risposta.status}${codice ? " " + codice : ""}` };
   } catch (errore) {
-    if (tentativo < SCORES_MAX_TENTATIVI) {
-      const attesa = setTimeout(() => {
-        inviaRisultatoClassifica(roomId, result, tentativo + 1);
-      }, tentativo * 2500);
-      if (attesa.unref) attesa.unref();
-      return;
-    }
-    console.warn(`[SCORES] Invio non riuscito dopo ${SCORES_MAX_TENTATIVI} tentativi: ${errore && errore.message}`);
-    notificaSalvataggio(roomId, result.resultId, "error");
+    return { esito: "error", messaggio: (errore && errore.message) || "errore di rete" };
   } finally {
     clearTimeout(timeout);
+  }
+};
+
+// Invio idempotente: il plugin riconosce resultId gia' presente e risponde
+// "duplicate", che per noi equivale a un salvataggio riuscito.
+const inviaRisultatoClassifica = async (roomId, result, tentativo) => {
+  if (!SCORES_URL || !SCORES_SECRET) {
+    notificaSalvataggio(roomId, result.resultId, "skipped", "Classifiche non configurate");
+    return;
+  }
+
+  const outcomes = Array.isArray(result.outcomes)
+    ? result.outcomes.slice(0, 16).map((o) => ({
+      player: String((o && o.name) || "Player").slice(0, 64),
+      esito: ESITI_CLASSIFICA[o && o.outcome] || "sconfitta"
+    }))
+    : [];
+
+  const esito = await inviaFirmata({
+    resultId: result.resultId,
+    roomId: result.roomId,
+    game: result.game,
+    mode: "multi",
+    winner: typeof result.winner === "string" ? result.winner : "",
+    matchSeq: result.matchSeq,
+    startedAt: dataIsoClassifica(result.startedAt),
+    durationSec: result.durationSec,
+    survivors: result.survivors,
+    infected: result.infected,
+    outcomes
+  });
+
+  if (esito.esito === "saved" || esito.esito === "duplicate") {
+    notificaSalvataggio(roomId, result.resultId, "saved");
+    return;
+  }
+
+  if (tentativo < SCORES_MAX_TENTATIVI) {
+    const attesa = setTimeout(() => {
+      inviaRisultatoClassifica(roomId, result, tentativo + 1);
+    }, tentativo * 2500);
+    if (attesa.unref) attesa.unref();
+    return;
+  }
+
+  console.warn(`[SCORES] Invio non riuscito dopo ${SCORES_MAX_TENTATIVI} tentativi: ${esito.messaggio}`);
+  notificaSalvataggio(roomId, result.resultId, "error");
+};
+
+// ---- Risultati del giocatore singolo -----------------------------------
+// Il client non possiede il segreto HMAC: nessun segreto deve stare nel
+// browser o nel pacchetto Android. La rotta /solo-result valida il
+// risultato, applica limiti antiabuso e lo inoltra firmato al plugin
+// WordPress. Se le classifiche non sono configurate risponde "skipped" e il
+// gioco resta identico (punteggio locale e storico Firebase invariati).
+
+const SOLO_MAX_BYTES = 8192;
+const SOLO_LETTURA_MS = 5000;
+const SOLO_MAX_PER_ORA = 30;
+const SOLO_FINESTRA_MS = 60 * 60 * 1000;
+const SOLO_MAX_DURATA_SEC = 86400;
+const SOLO_ANTICIPO_MS = 5 * 60 * 1000;
+const SOLO_ETA_MAX_MS = 24 * 60 * 60 * 1000;
+const SOLO_MAX_CONTATORI = 20000;
+const soloContatori = new Map();
+
+const origineConsentita = (req) => {
+  const origine = req.headers.origin;
+  return !origine || ALLOWED_ORIGINS.includes(origine);
+};
+
+const intestazioniCors = (req) => {
+  const intestazioni = {
+    "Cache-Control": "no-store",
+    "Vary": "Origin",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "600"
+  };
+  const origine = req.headers.origin;
+  if (origine && ALLOWED_ORIGINS.includes(origine)) {
+    intestazioni["Access-Control-Allow-Origin"] = origine;
+  }
+  return intestazioni;
+};
+
+const rispondiJson = (res, stato, dati, req, extra) => {
+  if (res.headersSent) return;
+  const corpo = JSON.stringify(dati);
+  res.writeHead(stato, {
+    ...intestazioniCors(req),
+    ...(extra || {}),
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(corpo),
+    "X-Content-Type-Options": "nosniff"
+  });
+  res.end(corpo);
+};
+
+const ipRichiesta = (req) => {
+  const inoltro = req.headers["x-forwarded-for"];
+  const primo = typeof inoltro === "string" ? inoltro.split(",")[0].trim() : "";
+  const ip = primo || (req.socket && req.socket.remoteAddress) || "sconosciuto";
+  return ip.slice(0, 64);
+};
+
+// Finestra scorrevole in memoria, come le stanze: si azzera a ogni riavvio.
+const soloRateConsentito = (req) => {
+  const adesso = Date.now();
+  if (soloContatori.size > SOLO_MAX_CONTATORI) {
+    for (const [chiave, voce] of soloContatori) {
+      if (adesso - voce.inizio >= SOLO_FINESTRA_MS) soloContatori.delete(chiave);
+    }
+  }
+  const ip = ipRichiesta(req);
+  let voce = soloContatori.get(ip);
+  if (!voce || adesso - voce.inizio >= SOLO_FINESTRA_MS) {
+    voce = { inizio: adesso, conteggio: 0 };
+    soloContatori.set(ip, voce);
+  }
+  voce.conteggio += 1;
+  return voce.conteggio <= SOLO_MAX_PER_ORA;
+};
+
+const leggiCorpo = (req) => new Promise((risolvi, rifiuta) => {
+  const pezzi = [];
+  let totale = 0;
+  let concluso = false;
+  const chiudi = (errore, esito) => {
+    if (concluso) return;
+    concluso = true;
+    clearTimeout(timer);
+    if (errore) rifiuta(errore);
+    else risolvi(esito);
+  };
+  const timer = setTimeout(
+    () => chiudi(Object.assign(new Error("timeout"), { codiceHttp: 408 })),
+    SOLO_LETTURA_MS
+  );
+  if (timer.unref) timer.unref();
+  req.on("data", (pezzo) => {
+    if (concluso) return;
+    totale += pezzo.length;
+    if (totale > SOLO_MAX_BYTES) {
+      chiudi(Object.assign(new Error("corpo troppo grande"), { codiceHttp: 413 }));
+      return;
+    }
+    pezzi.push(pezzo);
+  });
+  req.on("end", () => chiudi(null, Buffer.concat(pezzi).toString("utf8")));
+  req.on("error", (errore) => chiudi(Object.assign(errore, { codiceHttp: 400 })));
+});
+
+const avvioRisultatoSolo = (valore) => {
+  if (typeof valore === "number" && Number.isFinite(valore)) return Math.round(valore);
+  if (typeof valore === "string" && valore.trim()) {
+    const ms = Date.parse(valore);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
+};
+
+const gestisciRisultatoSolo = async (req, res) => {
+  try {
+    if (!origineConsentita(req)) {
+      rispondiJson(res, 403, { esito: "error", codice: "origine_non_ammessa" }, req);
+      return;
+    }
+    const tipo = String(req.headers["content-type"] || "").toLowerCase();
+    if (!tipo.startsWith("application/json")) {
+      rispondiJson(res, 415, { esito: "error", codice: "formato_non_supportato" }, req);
+      return;
+    }
+    if (!soloRateConsentito(req)) {
+      rispondiJson(res, 429, { esito: "error", codice: "troppi_invii" }, req, { "Retry-After": "600" });
+      return;
+    }
+
+    let dati = null;
+    try {
+      dati = JSON.parse(await leggiCorpo(req));
+    } catch (errore) {
+      const stato = errore && errore.codiceHttp ? errore.codiceHttp : 400;
+      const codice = stato === 413 ? "corpo_troppo_grande"
+        : (stato === 408 ? "timeout" : "json_non_valido");
+      rispondiJson(res, stato, { esito: "error", codice }, req);
+      return;
+    }
+    if (!dati || typeof dati !== "object" || Array.isArray(dati)) {
+      rispondiJson(res, 400, { esito: "error", codice: "payload_non_valido" }, req);
+      return;
+    }
+
+    const nomeGrezzo = typeof dati.playerName === "string" ? dati.playerName.trim() : "";
+    if (!nomeGrezzo) {
+      rispondiJson(res, 400, { esito: "error", codice: "nome_mancante" }, req);
+      return;
+    }
+    const nome = cleanName(nomeGrezzo);
+
+    const durata = Number.isInteger(dati.durationSec) ? dati.durationSec : null;
+    if (durata === null || durata < 0 || durata > SOLO_MAX_DURATA_SEC) {
+      rispondiJson(res, 400, { esito: "error", codice: "durata_non_valida" }, req);
+      return;
+    }
+    const botCount = Number.isInteger(dati.botCount) ? dati.botCount : 0;
+    if (botCount < 0 || botCount > 64) {
+      rispondiJson(res, 400, { esito: "error", codice: "bot_non_validi" }, req);
+      return;
+    }
+    const esitoPartita = dati.esito === "vittoria" ? "vittoria"
+      : (dati.esito === "sconfitta" ? "sconfitta" : null);
+    if (esitoPartita === null) {
+      rispondiJson(res, 400, { esito: "error", codice: "esito_non_valido" }, req);
+      return;
+    }
+
+    const avvio = avvioRisultatoSolo(dati.startedAt);
+    const adesso = Date.now();
+    if (avvio === null || avvio > adesso + SOLO_ANTICIPO_MS || avvio < adesso - SOLO_ETA_MAX_MS) {
+      rispondiJson(res, 400, { esito: "error", codice: "avvio_non_valido" }, req);
+      return;
+    }
+    if (durata * 1000 > (adesso - avvio) + 120000) {
+      rispondiJson(res, 400, { esito: "error", codice: "durata_incoerente" }, req);
+      return;
+    }
+
+    // resultId derivato da nome e avvio: un invio ripetuto resta idempotente
+    // e non crea righe doppie nella classifica.
+    const impronta = crypto.createHash("sha256").update(nome.toLowerCase()).digest("hex").slice(0, 16);
+    const resultId = "solo:" + impronta + ":" + avvio;
+
+    const esito = await inviaFirmata({
+      resultId: resultId,
+      roomId: "solo",
+      game: "virus-0",
+      mode: "solo",
+      winner: esitoPartita === "vittoria" ? nome : "",
+      matchSeq: 0,
+      startedAt: dataIsoClassifica(avvio),
+      durationSec: durata,
+      survivors: esitoPartita === "vittoria" ? 1 : 0,
+      infected: esitoPartita === "sconfitta" ? 1 : 0,
+      outcomes: [{
+        player: nome,
+        esito: esitoPartita,
+        score: durata,
+        metrics: { botCount: botCount }
+      }]
+    });
+
+    if (esito.esito === "error") {
+      console.warn("[SCORES] Risultato singolo non salvato: " + (esito.messaggio || "errore"));
+      rispondiJson(res, 502, { esito: "error", codice: "classifica_non_disponibile" }, req);
+      return;
+    }
+    rispondiJson(res, 200, { esito: esito.esito, resultId: resultId }, req);
+  } catch (errore) {
+    console.warn("[SCORES] Errore nella rotta solo-result: " + ((errore && errore.message) || "sconosciuto"));
+    rispondiJson(res, 500, { esito: "error", codice: "errore_interno" }, req);
   }
 };
 
